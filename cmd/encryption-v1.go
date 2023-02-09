@@ -48,10 +48,11 @@ import (
 
 var (
 	// AWS errors for invalid SSE-C requests.
-	errEncryptedObject      = errors.New("The object was stored using a form of SSE")
-	errInvalidSSEParameters = errors.New("The SSE-C key for key-rotation is not correct") // special access denied
-	errKMSNotConfigured     = errors.New("KMS not configured for a server side encrypted object")
-	errKMSKeyNotFound       = errors.New("Invalid KMS keyId")
+	errEncryptedObject                = errors.New("The object was stored using a form of SSE")
+	errInvalidSSEParameters           = errors.New("The SSE-C key for key-rotation is not correct") // special access denied
+	errKMSNotConfigured               = errors.New("KMS not configured for a server side encrypted object")
+	errKMSKeyNotFound                 = errors.New("Invalid KMS keyId")
+	errKMSDefaultKeyAlreadyConfigured = errors.New("MINIO_KMS_SECRET_KEY is configured. Additional keys cannot be configured")
 	// Additional MinIO errors for SSE-C requests.
 	errObjectTampered = errors.New("The requested object was modified and may be compromised")
 	// error returned when invalid encryption parameters are specified

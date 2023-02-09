@@ -168,7 +168,15 @@ func (a kmsAPIHandlers) KMSVersionHandler(w http.ResponseWriter, r *http.Request
 
 // KMSCreateKeyHandler - POST /minio/kms/v1/key/create?key-id=<master-key-id>
 func (a kmsAPIHandlers) KMSCreateKeyHandler(w http.ResponseWriter, r *http.Request) {
+	// If env variable MINIO_KMS_SECRET_KEY is present, prevent creation of new keys
 	ctx := newContext(r, w, "KMSCreateKey")
+	status, err := GlobalKMS.Stat(ctx)
+	if err == nil {
+		if status.DefaultKey != "" {
+			writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrKMSDefaultKeyAlreadyConfigured), r.URL)
+		}
+		return
+	}
 	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
 
 	objectAPI, _ := validateAdminReq(ctx, w, r, iampolicy.KMSCreateKeyAction)
@@ -236,6 +244,21 @@ func (a kmsAPIHandlers) KMSListKeysHandler(w http.ResponseWriter, r *http.Reques
 	}
 	manager, ok := GlobalKMS.(kms.KeyManager)
 	if !ok {
+		// If no key found in kms, check env variable MINIO_KMS_SECRET_KEY
+		status, err := GlobalKMS.Stat(ctx)
+		if err == nil {
+			secretKey := []kes.KeyInfo{
+				{
+					Name: status.DefaultKey,
+				},
+			}
+			if res, err := json.Marshal(secretKey); err != nil {
+				writeCustomErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrInternalError), err.Error(), r.URL)
+			} else {
+				writeSuccessResponseJSON(w, res)
+			}
+			return
+		}
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrNotImplemented), r.URL)
 		return
 	}

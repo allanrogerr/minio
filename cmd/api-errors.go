@@ -217,6 +217,7 @@ const (
 	ErrIncompatibleEncryptionMethod
 	ErrKMSNotConfigured
 	ErrKMSKeyNotFoundException
+	ErrKMSDefaultKeyAlreadyConfigured
 
 	ErrNoAccessKey
 	ErrInvalidToken
@@ -1159,6 +1160,11 @@ var errorCodes = errorCodeMap{
 		Description:    "Invalid keyId",
 		HTTPStatusCode: http.StatusBadRequest,
 	},
+	ErrKMSDefaultKeyAlreadyConfigured: {
+		Code:           "KMS.DefaultKeyAlreadyConfiguredException",
+		Description:    "MINIO_KMS_SECRET_KEY is configured. Additional keys cannot be configured.",
+		HTTPStatusCode: http.StatusBadRequest,
+	},
 	ErrNoAccessKey: {
 		Code:           "AccessDenied",
 		Description:    "No AWSAccessKey was presented",
@@ -2032,6 +2038,8 @@ func toAPIErrorCode(ctx context.Context, err error) (apiErr APIErrorCode) {
 		apiErr = ErrKMSNotConfigured
 	case errKMSKeyNotFound:
 		apiErr = ErrKMSKeyNotFoundException
+	case errKMSDefaultKeyAlreadyConfigured:
+		apiErr = ErrKMSDefaultKeyAlreadyConfigured
 
 	case context.Canceled, context.DeadlineExceeded:
 		apiErr = ErrOperationTimedOut
