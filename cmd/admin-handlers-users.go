@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -28,12 +29,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/klauspost/compress/zip"
 	"github.com/minio/madmin-go/v2"
 	"github.com/minio/minio/internal/auth"
 	"github.com/minio/minio/internal/config/dns"
 	"github.com/minio/minio/internal/logger"
+	"github.com/minio/mux"
 	iampolicy "github.com/minio/pkg/iam/policy"
 )
 
@@ -66,17 +67,14 @@ func (a adminAPIHandlers) RemoveUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
+	logger.LogIf(ctx, globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
 		Type: madmin.SRIAMItemIAMUser,
 		IAMUser: &madmin.SRIAMUser{
 			AccessKey:   accessKey,
 			IsDeleteReq: true,
 		},
 		UpdatedAt: UTCNow(),
-	}); err != nil {
-		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
-		return
-	}
+	}))
 }
 
 // ListBucketUsers - GET /minio/admin/v3/list-users?bucket={bucket}
@@ -177,7 +175,7 @@ func (a adminAPIHandlers) GetUserInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cred, claims, owner, s3Err := validateAdminSignature(ctx, r, "")
+	cred, owner, s3Err := validateAdminSignature(ctx, r, "")
 	if s3Err != ErrNone {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
@@ -194,9 +192,9 @@ func (a adminAPIHandlers) GetUserInfo(w http.ResponseWriter, r *http.Request) {
 		AccountName:     cred.AccessKey,
 		Groups:          cred.Groups,
 		Action:          iampolicy.GetUserAdminAction,
-		ConditionValues: getConditionValues(r, "", cred.AccessKey, claims),
+		ConditionValues: getConditionValues(r, "", cred),
 		IsOwner:         owner,
-		Claims:          claims,
+		Claims:          cred.Claims,
 		DenyOnly:        checkDenyOnly,
 	}) {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrAccessDenied), r.URL)
@@ -261,16 +259,13 @@ func (a adminAPIHandlers) UpdateGroupMembers(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if err := globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
+	logger.LogIf(ctx, globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
 		Type: madmin.SRIAMItemGroupInfo,
 		GroupInfo: &madmin.SRGroupInfo{
 			UpdateReq: updReq,
 		},
 		UpdatedAt: updatedAt,
-	}); err != nil {
-		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
-		return
-	}
+	}))
 }
 
 // GetGroup - /minio/admin/v3/group?group=mygroup1
@@ -360,7 +355,7 @@ func (a adminAPIHandlers) SetGroupStatus(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
+	logger.LogIf(ctx, globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
 		Type: madmin.SRIAMItemGroupInfo,
 		GroupInfo: &madmin.SRGroupInfo{
 			UpdateReq: madmin.GroupAddRemove{
@@ -370,10 +365,7 @@ func (a adminAPIHandlers) SetGroupStatus(w http.ResponseWriter, r *http.Request)
 			},
 		},
 		UpdatedAt: updatedAt,
-	}); err != nil {
-		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
-		return
-	}
+	}))
 }
 
 // SetUserStatus - PUT /minio/admin/v3/set-user-status?accessKey=<access_key>&status=[enabled|disabled]
@@ -403,7 +395,7 @@ func (a adminAPIHandlers) SetUserStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if err := globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
+	logger.LogIf(ctx, globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
 		Type: madmin.SRIAMItemIAMUser,
 		IAMUser: &madmin.SRIAMUser{
 			AccessKey:   accessKey,
@@ -413,10 +405,7 @@ func (a adminAPIHandlers) SetUserStatus(w http.ResponseWriter, r *http.Request) 
 			},
 		},
 		UpdatedAt: updatedAt,
-	}); err != nil {
-		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
-		return
-	}
+	}))
 }
 
 // AddUser - PUT /minio/admin/v3/add-user?accessKey=<access_key>
@@ -435,7 +424,7 @@ func (a adminAPIHandlers) AddUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cred, claims, owner, s3Err := validateAdminSignature(ctx, r, "")
+	cred, owner, s3Err := validateAdminSignature(ctx, r, "")
 	if s3Err != ErrNone {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
@@ -479,9 +468,9 @@ func (a adminAPIHandlers) AddUser(w http.ResponseWriter, r *http.Request) {
 		AccountName:     cred.AccessKey,
 		Groups:          cred.Groups,
 		Action:          iampolicy.CreateUserAdminAction,
-		ConditionValues: getConditionValues(r, "", cred.AccessKey, claims),
+		ConditionValues: getConditionValues(r, "", cred),
 		IsOwner:         owner,
-		Claims:          claims,
+		Claims:          cred.Claims,
 		DenyOnly:        checkDenyOnly,
 	}) {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrAccessDenied), r.URL)
@@ -515,7 +504,7 @@ func (a adminAPIHandlers) AddUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
+	logger.LogIf(ctx, globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
 		Type: madmin.SRIAMItemIAMUser,
 		IAMUser: &madmin.SRIAMUser{
 			AccessKey:   accessKey,
@@ -523,10 +512,7 @@ func (a adminAPIHandlers) AddUser(w http.ResponseWriter, r *http.Request) {
 			UserReq:     &ureq,
 		},
 		UpdatedAt: updatedAt,
-	}); err != nil {
-		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
-		return
-	}
+	}))
 }
 
 // TemporaryAccountInfo - GET /minio/admin/v3/temporary-account-info
@@ -542,7 +528,7 @@ func (a adminAPIHandlers) TemporaryAccountInfo(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	cred, claims, owner, s3Err := validateAdminSignature(ctx, r, "")
+	cred, owner, s3Err := validateAdminSignature(ctx, r, "")
 	if s3Err != ErrNone {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
@@ -556,10 +542,11 @@ func (a adminAPIHandlers) TemporaryAccountInfo(w http.ResponseWriter, r *http.Re
 
 	if !globalIAMSys.IsAllowed(iampolicy.Args{
 		AccountName:     cred.AccessKey,
+		Groups:          cred.Groups,
 		Action:          iampolicy.ListTemporaryAccountsAdminAction,
-		ConditionValues: getConditionValues(r, "", cred.AccessKey, claims),
+		ConditionValues: getConditionValues(r, "", cred),
 		IsOwner:         owner,
-		Claims:          claims,
+		Claims:          cred.Claims,
 	}) {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrAccessDenied), r.URL)
 		return
@@ -625,7 +612,7 @@ func (a adminAPIHandlers) AddServiceAccount(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	cred, claims, owner, s3Err := validateAdminSignature(ctx, r, "")
+	cred, owner, s3Err := validateAdminSignature(ctx, r, "")
 	if s3Err != ErrNone {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
@@ -665,6 +652,7 @@ func (a adminAPIHandlers) AddServiceAccount(w http.ResponseWriter, r *http.Reque
 	opts := newServiceAccountOpts{
 		accessKey: createReq.AccessKey,
 		secretKey: createReq.SecretKey,
+		comment:   createReq.Comment,
 		claims:    make(map[string]interface{}),
 	}
 
@@ -677,6 +665,17 @@ func (a adminAPIHandlers) AddServiceAccount(w http.ResponseWriter, r *http.Reque
 	if cred.IsServiceAccount() || cred.IsTemp() {
 		requestorParentUser = cred.ParentUser
 		requestorIsDerivedCredential = true
+	}
+
+	if globalIAMSys.GetUsersSysType() == MinIOUsersSysType && targetUser != cred.AccessKey {
+		// For internal IDP, ensure that the targetUser's parent account exists.
+		// It could be a regular user account or the root account.
+		_, isRegularUser := globalIAMSys.GetUser(ctx, targetUser)
+		if !isRegularUser && targetUser != globalActiveCred.AccessKey {
+			writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx,
+				fmt.Errorf("parent user %s does not exist. Cannot create service account", targetUser)), r.URL)
+			return
+		}
 	}
 
 	// Check if we are creating svc account for request sender.
@@ -697,9 +696,9 @@ func (a adminAPIHandlers) AddServiceAccount(w http.ResponseWriter, r *http.Reque
 			AccountName:     requestorUser,
 			Groups:          requestorGroups,
 			Action:          iampolicy.CreateServiceAccountAdminAction,
-			ConditionValues: getConditionValues(r, "", cred.AccessKey, claims),
+			ConditionValues: getConditionValues(r, "", cred),
 			IsOwner:         owner,
-			Claims:          claims,
+			Claims:          cred.Claims,
 			DenyOnly:        true,
 		}) {
 			writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrAccessDenied), r.URL)
@@ -731,9 +730,9 @@ func (a adminAPIHandlers) AddServiceAccount(w http.ResponseWriter, r *http.Reque
 			AccountName:     requestorUser,
 			Groups:          requestorGroups,
 			Action:          iampolicy.CreateServiceAccountAdminAction,
-			ConditionValues: getConditionValues(r, "", cred.AccessKey, claims),
+			ConditionValues: getConditionValues(r, "", cred),
 			IsOwner:         owner,
-			Claims:          claims,
+			Claims:          cred.Claims,
 		}) {
 			writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrAccessDenied), r.URL)
 			return
@@ -797,7 +796,7 @@ func (a adminAPIHandlers) AddServiceAccount(w http.ResponseWriter, r *http.Reque
 	// Call hook for cluster-replication if the service account is not for a
 	// root user.
 	if newCred.ParentUser != globalActiveCred.AccessKey {
-		err = globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
+		logger.LogIf(ctx, globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
 			Type: madmin.SRIAMItemSvcAcc,
 			SvcAccChange: &madmin.SRSvcAccChange{
 				Create: &madmin.SRSvcAccCreate{
@@ -805,17 +804,14 @@ func (a adminAPIHandlers) AddServiceAccount(w http.ResponseWriter, r *http.Reque
 					AccessKey:     newCred.AccessKey,
 					SecretKey:     newCred.SecretKey,
 					Groups:        newCred.Groups,
+					Comment:       newCred.Comment,
 					Claims:        opts.claims,
 					SessionPolicy: createReq.Policy,
 					Status:        auth.AccountOn,
 				},
 			},
 			UpdatedAt: updatedAt,
-		})
-		if err != nil {
-			logger.LogIf(ctx, err)
-			return
-		}
+		}))
 	}
 }
 
@@ -832,7 +828,7 @@ func (a adminAPIHandlers) UpdateServiceAccount(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	cred, claims, owner, s3Err := validateAdminSignature(ctx, r, "")
+	cred, owner, s3Err := validateAdminSignature(ctx, r, "")
 	if s3Err != ErrNone {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
@@ -852,10 +848,11 @@ func (a adminAPIHandlers) UpdateServiceAccount(w http.ResponseWriter, r *http.Re
 
 	if !globalIAMSys.IsAllowed(iampolicy.Args{
 		AccountName:     cred.AccessKey,
+		Groups:          cred.Groups,
 		Action:          iampolicy.UpdateServiceAccountAdminAction,
-		ConditionValues: getConditionValues(r, "", cred.AccessKey, claims),
+		ConditionValues: getConditionValues(r, "", cred),
 		IsOwner:         owner,
-		Claims:          claims,
+		Claims:          cred.Claims,
 	}) {
 		requestUser := cred.AccessKey
 		if cred.ParentUser != "" {
@@ -892,6 +889,7 @@ func (a adminAPIHandlers) UpdateServiceAccount(w http.ResponseWriter, r *http.Re
 	opts := updateServiceAccountOpts{
 		secretKey:     updateReq.NewSecretKey,
 		status:        updateReq.NewStatus,
+		comment:       updateReq.NewComment,
 		sessionPolicy: sp,
 	}
 	updatedAt, err := globalIAMSys.UpdateServiceAccount(ctx, accessKey, opts)
@@ -902,22 +900,19 @@ func (a adminAPIHandlers) UpdateServiceAccount(w http.ResponseWriter, r *http.Re
 
 	// Call site replication hook - non-root user accounts are replicated.
 	if svcAccount.ParentUser != globalActiveCred.AccessKey {
-		err = globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
+		logger.LogIf(ctx, globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
 			Type: madmin.SRIAMItemSvcAcc,
 			SvcAccChange: &madmin.SRSvcAccChange{
 				Update: &madmin.SRSvcAccUpdate{
 					AccessKey:     accessKey,
 					SecretKey:     opts.secretKey,
 					Status:        opts.status,
+					Comment:       opts.comment,
 					SessionPolicy: updateReq.NewPolicy,
 				},
 			},
 			UpdatedAt: updatedAt,
-		})
-		if err != nil {
-			writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
-			return
-		}
+		}))
 	}
 
 	writeSuccessNoContent(w)
@@ -936,7 +931,7 @@ func (a adminAPIHandlers) InfoServiceAccount(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	cred, claims, owner, s3Err := validateAdminSignature(ctx, r, "")
+	cred, owner, s3Err := validateAdminSignature(ctx, r, "")
 	if s3Err != ErrNone {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
@@ -956,10 +951,11 @@ func (a adminAPIHandlers) InfoServiceAccount(w http.ResponseWriter, r *http.Requ
 
 	if !globalIAMSys.IsAllowed(iampolicy.Args{
 		AccountName:     cred.AccessKey,
+		Groups:          cred.Groups,
 		Action:          iampolicy.ListServiceAccountsAdminAction,
-		ConditionValues: getConditionValues(r, "", cred.AccessKey, claims),
+		ConditionValues: getConditionValues(r, "", cred),
 		IsOwner:         owner,
-		Claims:          claims,
+		Claims:          cred.Claims,
 	}) {
 		requestUser := cred.AccessKey
 		if cred.ParentUser != "" {
@@ -993,6 +989,7 @@ func (a adminAPIHandlers) InfoServiceAccount(w http.ResponseWriter, r *http.Requ
 
 	infoResp := madmin.InfoServiceAccountResp{
 		ParentUser:    svcAccount.ParentUser,
+		Comment:       svcAccount.Comment,
 		AccountStatus: svcAccount.Status,
 		ImpliedPolicy: policy == nil,
 		Policy:        string(policyJSON),
@@ -1026,7 +1023,7 @@ func (a adminAPIHandlers) ListServiceAccounts(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	cred, claims, owner, s3Err := validateAdminSignature(ctx, r, "")
+	cred, owner, s3Err := validateAdminSignature(ctx, r, "")
 	if s3Err != ErrNone {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
@@ -1040,10 +1037,11 @@ func (a adminAPIHandlers) ListServiceAccounts(w http.ResponseWriter, r *http.Req
 	if user != "" && user != cred.AccessKey {
 		if !globalIAMSys.IsAllowed(iampolicy.Args{
 			AccountName:     cred.AccessKey,
+			Groups:          cred.Groups,
 			Action:          iampolicy.ListServiceAccountsAdminAction,
-			ConditionValues: getConditionValues(r, "", cred.AccessKey, claims),
+			ConditionValues: getConditionValues(r, "", cred),
 			IsOwner:         owner,
-			Claims:          claims,
+			Claims:          cred.Claims,
 		}) {
 			writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrAccessDenied), r.URL)
 			return
@@ -1100,7 +1098,7 @@ func (a adminAPIHandlers) DeleteServiceAccount(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	cred, claims, owner, s3Err := validateAdminSignature(ctx, r, "")
+	cred, owner, s3Err := validateAdminSignature(ctx, r, "")
 	if s3Err != ErrNone {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
@@ -1118,10 +1116,11 @@ func (a adminAPIHandlers) DeleteServiceAccount(w http.ResponseWriter, r *http.Re
 
 	adminPrivilege := globalIAMSys.IsAllowed(iampolicy.Args{
 		AccountName:     cred.AccessKey,
+		Groups:          cred.Groups,
 		Action:          iampolicy.RemoveServiceAccountAdminAction,
-		ConditionValues: getConditionValues(r, "", cred.AccessKey, claims),
+		ConditionValues: getConditionValues(r, "", cred),
 		IsOwner:         owner,
-		Claims:          claims,
+		Claims:          cred.Claims,
 	})
 
 	if !adminPrivilege {
@@ -1145,7 +1144,7 @@ func (a adminAPIHandlers) DeleteServiceAccount(w http.ResponseWriter, r *http.Re
 
 	// Call site replication hook - non-root user accounts are replicated.
 	if svcAccount.ParentUser != "" && svcAccount.ParentUser != globalActiveCred.AccessKey {
-		if err := globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
+		logger.LogIf(ctx, globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
 			Type: madmin.SRIAMItemSvcAcc,
 			SvcAccChange: &madmin.SRSvcAccChange{
 				Delete: &madmin.SRSvcAccDelete{
@@ -1153,10 +1152,7 @@ func (a adminAPIHandlers) DeleteServiceAccount(w http.ResponseWriter, r *http.Re
 				},
 			},
 			UpdatedAt: UTCNow(),
-		}); err != nil {
-			writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
-			return
-		}
+		}))
 	}
 
 	writeSuccessNoContent(w)
@@ -1175,7 +1171,7 @@ func (a adminAPIHandlers) AccountInfoHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	cred, claims, owner, s3Err := validateAdminSignature(ctx, r, "")
+	cred, owner, s3Err := validateAdminSignature(ctx, r, "")
 	if s3Err != ErrNone {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
@@ -1196,10 +1192,10 @@ func (a adminAPIHandlers) AccountInfoHandler(w http.ResponseWriter, r *http.Requ
 			Groups:          cred.Groups,
 			Action:          iampolicy.ListBucketAction,
 			BucketName:      bucketName,
-			ConditionValues: getConditionValues(r, "", cred.AccessKey, claims),
+			ConditionValues: getConditionValues(r, "", cred),
 			IsOwner:         owner,
 			ObjectName:      "",
-			Claims:          claims,
+			Claims:          cred.Claims,
 		}) {
 			rd = true
 		}
@@ -1209,10 +1205,10 @@ func (a adminAPIHandlers) AccountInfoHandler(w http.ResponseWriter, r *http.Requ
 			Groups:          cred.Groups,
 			Action:          iampolicy.GetBucketLocationAction,
 			BucketName:      bucketName,
-			ConditionValues: getConditionValues(r, "", cred.AccessKey, claims),
+			ConditionValues: getConditionValues(r, "", cred),
 			IsOwner:         owner,
 			ObjectName:      "",
-			Claims:          claims,
+			Claims:          cred.Claims,
 		}) {
 			rd = true
 		}
@@ -1222,10 +1218,10 @@ func (a adminAPIHandlers) AccountInfoHandler(w http.ResponseWriter, r *http.Requ
 			Groups:          cred.Groups,
 			Action:          iampolicy.PutObjectAction,
 			BucketName:      bucketName,
-			ConditionValues: getConditionValues(r, "", cred.AccessKey, claims),
+			ConditionValues: getConditionValues(r, "", cred),
 			IsOwner:         owner,
 			ObjectName:      "",
-			Claims:          claims,
+			Claims:          cred.Claims,
 		}) {
 			wr = true
 		}
@@ -1270,8 +1266,8 @@ func (a adminAPIHandlers) AccountInfoHandler(w http.ResponseWriter, r *http.Requ
 		accountName = cred.ParentUser
 	}
 
-	roleArn := iampolicy.Args{Claims: claims}.GetRoleArn()
-	policySetFromClaims, hasPolicyClaim := iampolicy.GetPoliciesFromClaims(claims, iamPolicyClaimNameOpenID())
+	roleArn := iampolicy.Args{Claims: cred.Claims}.GetRoleArn()
+	policySetFromClaims, hasPolicyClaim := iampolicy.GetPoliciesFromClaims(cred.Claims, iamPolicyClaimNameOpenID())
 	var effectivePolicy iampolicy.Policy
 
 	var buf []byte
@@ -1517,14 +1513,11 @@ func (a adminAPIHandlers) RemoveCannedPolicy(w http.ResponseWriter, r *http.Requ
 
 	// Call cluster-replication policy creation hook to replicate policy deletion to
 	// other minio clusters.
-	if err := globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
+	logger.LogIf(ctx, globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
 		Type:      madmin.SRIAMItemPolicy,
 		Name:      policyName,
 		UpdatedAt: UTCNow(),
-	}); err != nil {
-		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
-		return
-	}
+	}))
 }
 
 // AddCannedPolicy - PUT /minio/admin/v3/add-canned-policy?name=<policy_name>
@@ -1585,15 +1578,12 @@ func (a adminAPIHandlers) AddCannedPolicy(w http.ResponseWriter, r *http.Request
 
 	// Call cluster-replication policy creation hook to replicate policy to
 	// other minio clusters.
-	if err := globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
+	logger.LogIf(ctx, globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
 		Type:      madmin.SRIAMItemPolicy,
 		Name:      policyName,
 		Policy:    iamPolicyBytes,
 		UpdatedAt: updatedAt,
-	}); err != nil {
-		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
-		return
-	}
+	}))
 }
 
 // SetPolicyForUserOrGroup - PUT /minio/admin/v3/set-policy?policy=xxx&user-or-group=?[&is-group]
@@ -1652,7 +1642,7 @@ func (a adminAPIHandlers) SetPolicyForUserOrGroup(w http.ResponseWriter, r *http
 		return
 	}
 
-	if err := globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
+	logger.LogIf(ctx, globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
 		Type: madmin.SRIAMItemPolicyMapping,
 		PolicyMapping: &madmin.SRPolicyMapping{
 			UserOrGroup: entityName,
@@ -1661,10 +1651,7 @@ func (a adminAPIHandlers) SetPolicyForUserOrGroup(w http.ResponseWriter, r *http
 			Policy:      policyName,
 		},
 		UpdatedAt: updatedAt,
-	}); err != nil {
-		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
-		return
-	}
+	}))
 }
 
 // ListPolicyMappingEntities - GET /minio/admin/v3/idp/builtin/polciy-entities?policy=xxx&user=xxx&group=xxx
@@ -1720,7 +1707,7 @@ func (a adminAPIHandlers) AttachPolicyBuiltin(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	cred, _, _, s3Err := validateAdminSignature(ctx, r, "")
+	cred, _, s3Err := validateAdminSignature(ctx, r, "")
 	if s3Err != ErrNone {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
@@ -1819,7 +1806,7 @@ func (a adminAPIHandlers) AttachPolicyBuiltin(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if err := globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
+	logger.LogIf(ctx, globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
 		Type: madmin.SRIAMItemPolicyMapping,
 		PolicyMapping: &madmin.SRPolicyMapping{
 			UserOrGroup: userOrGroup,
@@ -1828,10 +1815,7 @@ func (a adminAPIHandlers) AttachPolicyBuiltin(w http.ResponseWriter, r *http.Req
 			Policy:      strings.Join(policiesToAttach, ","),
 		},
 		UpdatedAt: updatedAt,
-	}); err != nil {
-		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
-		return
-	}
+	}))
 
 	writeResponse(w, http.StatusCreated, nil, mimeNone)
 }
@@ -1847,7 +1831,7 @@ func (a adminAPIHandlers) DetachPolicyBuiltin(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	cred, _, _, s3Err := validateAdminSignature(ctx, r, "")
+	cred, _, s3Err := validateAdminSignature(ctx, r, "")
 	if s3Err != ErrNone {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
@@ -1952,7 +1936,7 @@ func (a adminAPIHandlers) DetachPolicyBuiltin(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if err := globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
+	logger.LogIf(ctx, globalSiteReplicationSys.IAMChangeHook(ctx, madmin.SRIAMItem{
 		Type: madmin.SRIAMItemPolicyMapping,
 		PolicyMapping: &madmin.SRPolicyMapping{
 			UserOrGroup: userOrGroup,
@@ -1961,10 +1945,7 @@ func (a adminAPIHandlers) DetachPolicyBuiltin(w http.ResponseWriter, r *http.Req
 			Policy:      strings.Join(policiesToDetach, ","),
 		},
 		UpdatedAt: updatedAt,
-	}); err != nil {
-		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
-		return
-	}
+	}))
 
 	// Return successful JSON response
 	writeSuccessNoContent(w)
@@ -2241,7 +2222,7 @@ func (a adminAPIHandlers) ImportIAM(w http.ResponseWriter, r *http.Request) {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrServerNotInitialized), r.URL)
 		return
 	}
-	cred, claims, owner, s3Err := validateAdminSignature(ctx, r, "")
+	cred, owner, s3Err := validateAdminSignature(ctx, r, "")
 	if s3Err != ErrNone {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
@@ -2353,9 +2334,9 @@ func (a adminAPIHandlers) ImportIAM(w http.ResponseWriter, r *http.Request) {
 					AccountName:     cred.AccessKey,
 					Groups:          cred.Groups,
 					Action:          iampolicy.CreateUserAdminAction,
-					ConditionValues: getConditionValues(r, "", cred.AccessKey, claims),
+					ConditionValues: getConditionValues(r, "", cred),
 					IsOwner:         owner,
-					Claims:          claims,
+					Claims:          cred.Claims,
 					DenyOnly:        checkDenyOnly,
 				}) {
 					writeErrorResponseJSON(ctx, w, importErrorWithAPIErr(ctx, ErrAccessDenied, err, allUsersFile, accessKey), r.URL)
@@ -2444,12 +2425,12 @@ func (a adminAPIHandlers) ImportIAM(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if !globalIAMSys.IsAllowed(iampolicy.Args{
-					AccountName:     svcAcctReq.AccessKey,
-					Groups:          svcAcctReq.Groups,
+					AccountName:     cred.AccessKey,
+					Groups:          cred.Groups,
 					Action:          iampolicy.CreateServiceAccountAdminAction,
-					ConditionValues: getConditionValues(r, "", cred.AccessKey, claims),
+					ConditionValues: getConditionValues(r, "", cred),
 					IsOwner:         owner,
-					Claims:          claims,
+					Claims:          cred.Claims,
 				}) {
 					writeErrorResponseJSON(ctx, w, importErrorWithAPIErr(ctx, ErrAccessDenied, err, allSvcAcctsFile, user), r.URL)
 					return
@@ -2467,6 +2448,7 @@ func (a adminAPIHandlers) ImportIAM(w http.ResponseWriter, r *http.Request) {
 					opts := updateServiceAccountOpts{
 						secretKey:     svcAcctReq.SecretKey,
 						status:        svcAcctReq.Status,
+						comment:       svcAcctReq.Comment,
 						sessionPolicy: sp,
 					}
 					_, err = globalIAMSys.UpdateServiceAccount(ctx, svcAcctReq.AccessKey, opts)
@@ -2481,6 +2463,7 @@ func (a adminAPIHandlers) ImportIAM(w http.ResponseWriter, r *http.Request) {
 					secretKey:     svcAcctReq.SecretKey,
 					sessionPolicy: sp,
 					claims:        svcAcctReq.Claims,
+					comment:       svcAcctReq.Comment,
 				}
 
 				// In case of LDAP we need to resolve the targetUser to a DN and

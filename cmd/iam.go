@@ -294,7 +294,7 @@ func (sys *IAMSys) Init(ctx context.Context, objAPI ObjectLayer, etcdClient *etc
 				logger.Info("Waiting for all MinIO IAM sub-system to be initialized.. possible cause (%v)", err)
 				continue
 			}
-			logger.LogIf(ctx, errors.New("IAM sub-system is partially initialized, unable to write the IAM format"))
+			logger.LogIf(ctx, fmt.Errorf("IAM sub-system is partially initialized, unable to write the IAM format: %w", err))
 			return
 		}
 
@@ -310,7 +310,7 @@ func (sys *IAMSys) Init(ctx context.Context, objAPI ObjectLayer, etcdClient *etc
 				continue
 			}
 			if err != nil {
-				logger.LogIf(ctx, fmt.Errorf("Unable to initialize IAM sub-system, some users may not be available %w", err))
+				logger.LogIf(ctx, fmt.Errorf("Unable to initialize IAM sub-system, some users may not be available: %w", err))
 			}
 		}
 		break
@@ -919,6 +919,7 @@ type newServiceAccountOpts struct {
 	sessionPolicy *iampolicy.Policy
 	accessKey     string
 	secretKey     string
+	comment       string
 
 	claims map[string]interface{}
 }
@@ -989,6 +990,7 @@ func (sys *IAMSys) NewServiceAccount(ctx context.Context, parentUser string, gro
 	cred.ParentUser = parentUser
 	cred.Groups = groups
 	cred.Status = string(auth.AccountOn)
+	cred.Comment = opts.comment
 
 	updatedAt, err := sys.store.AddServiceAccount(ctx, cred)
 	if err != nil {
@@ -1003,6 +1005,7 @@ type updateServiceAccountOpts struct {
 	sessionPolicy *iampolicy.Policy
 	secretKey     string
 	status        string
+	comment       string
 }
 
 // UpdateServiceAccount - edit a service account
@@ -1690,9 +1693,6 @@ func (sys *IAMSys) IsAllowedServiceAccount(args iampolicy.Args, parentUser strin
 
 	parentArgs := args
 	parentArgs.AccountName = parentUser
-	// These are dynamic values set them appropriately.
-	parentArgs.ConditionValues["username"] = []string{parentUser}
-	parentArgs.ConditionValues["userid"] = []string{parentUser}
 
 	saPolicyClaim, ok := args.Claims[iamPolicyClaimNameSA()]
 	if !ok {
@@ -1818,10 +1818,6 @@ func (sys *IAMSys) IsAllowedSTS(args iampolicy.Args, parentUser string) bool {
 	}
 
 	// 3. If an inline session-policy is present, evaluate it.
-
-	// These are dynamic values set them appropriately.
-	args.ConditionValues["username"] = []string{parentUser}
-	args.ConditionValues["userid"] = []string{parentUser}
 
 	// Now check if we have a sessionPolicy.
 	hasSessionPolicy, isAllowedSP := isAllowedBySessionPolicy(args)

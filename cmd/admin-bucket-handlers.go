@@ -29,7 +29,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/mux"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/klauspost/compress/zip"
 	"github.com/minio/kes"
@@ -41,6 +40,7 @@ import (
 	"github.com/minio/minio/internal/event"
 	"github.com/minio/minio/internal/kms"
 	"github.com/minio/minio/internal/logger"
+	"github.com/minio/mux"
 	"github.com/minio/pkg/bucket/policy"
 	iampolicy "github.com/minio/pkg/iam/policy"
 )
@@ -107,10 +107,7 @@ func (a adminAPIHandlers) PutBucketQuotaConfigHandler(w http.ResponseWriter, r *
 	}
 
 	// Call site replication hook.
-	if err = globalSiteReplicationSys.BucketMetaHook(ctx, bucketMeta); err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-		return
-	}
+	logger.LogIf(ctx, globalSiteReplicationSys.BucketMetaHook(ctx, bucketMeta))
 
 	// Write success response.
 	writeSuccessResponseHeadersOnly(w)
@@ -172,7 +169,7 @@ func (a adminAPIHandlers) SetRemoteTargetHandler(w http.ResponseWriter, r *http.
 		return
 	}
 
-	cred, _, _, s3Err := validateAdminSignature(ctx, r, "")
+	cred, _, s3Err := validateAdminSignature(ctx, r, "")
 	if s3Err != ErrNone {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return

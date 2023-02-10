@@ -32,7 +32,6 @@ import (
 	"hash/crc32"
 	"io"
 	"math"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -45,16 +44,17 @@ import (
 	"time"
 
 	"github.com/dustin/go-humanize"
-	"github.com/gorilla/mux"
 	"github.com/klauspost/compress/zip"
 	"github.com/minio/madmin-go/v2"
 	"github.com/minio/madmin-go/v2/estream"
+	"github.com/minio/minio-go/v7/pkg/set"
 	"github.com/minio/minio/internal/dsync"
 	"github.com/minio/minio/internal/handlers"
 	xhttp "github.com/minio/minio/internal/http"
 	"github.com/minio/minio/internal/kms"
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/minio/internal/logger/message/log"
+	"github.com/minio/mux"
 	iampolicy "github.com/minio/pkg/iam/policy"
 	xnet "github.com/minio/pkg/net"
 	"github.com/secure-io/sio-go"
@@ -1102,7 +1102,7 @@ func (a adminAPIHandlers) HealHandler(w http.ResponseWriter, r *http.Request) {
 // If no ObjectLayer is provided no set status is returned.
 func getAggregatedBackgroundHealState(ctx context.Context, o ObjectLayer) (madmin.BgHealState, error) {
 	// Get local heal status first
-	bgHealStates, ok := getBackgroundHealStatus(ctx, o)
+	bgHealStates, ok := getLocalBackgroundHealStatus(ctx, o)
 	if !ok {
 		return bgHealStates, errServerNotInitialized
 	}
@@ -1901,7 +1901,7 @@ func getKubernetesInfo(dctx context.Context) madmin.KubernetesInfo {
 		ki.Error = err.Error()
 		return ki
 	}
-
+	defer resp.Body.Close()
 	decoder := json.NewDecoder(resp.Body)
 	if err := decoder.Decode(&ki); err != nil {
 		ki.Error = err.Error()
@@ -2078,8 +2078,8 @@ func fetchHealthInfo(healthCtx context.Context, objectAPI ObjectLayer, query *ur
 			// No ellipses pattern. Anonymize host name from every pool arg
 			pools := strings.Fields(poolsArgs)
 			anonPools = make([]string, len(pools))
-			for _, arg := range pools {
-				anonPools = append(anonPools, anonAddr(arg))
+			for index, arg := range pools {
+				anonPools[index] = anonAddr(arg)
 			}
 			return cmdLineWithoutPools + strings.Join(anonPools, " ")
 		}
@@ -2339,66 +2339,6 @@ func getTLSInfo() madmin.TLSInfo {
 		}
 	}
 	return tlsInfo
-}
-
-// BandwidthMonitorHandler - GET /minio/admin/v3/bandwidth
-// ----------
-// Get bandwidth consumption information
-func (a adminAPIHandlers) BandwidthMonitorHandler(w http.ResponseWriter, r *http.Request) {
-	ctx := newContext(r, w, "BandwidthMonitor")
-
-	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
-
-	// Validate request signature.
-	_, adminAPIErr := checkAdminRequestAuth(ctx, r, iampolicy.BandwidthMonitorAction, "")
-	if adminAPIErr != ErrNone {
-		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(adminAPIErr), r.URL)
-		return
-	}
-
-	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
-
-	setEventStreamHeaders(w)
-	reportCh := make(chan madmin.BucketBandwidthReport)
-	keepAliveTicker := time.NewTicker(500 * time.Millisecond)
-	defer keepAliveTicker.Stop()
-	bucketsRequestedString := r.Form.Get("buckets")
-	bucketsRequested := strings.Split(bucketsRequestedString, ",")
-	go func() {
-		defer close(reportCh)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case reportCh <- globalNotificationSys.GetBandwidthReports(ctx, bucketsRequested...):
-				time.Sleep(time.Duration(rnd.Float64() * float64(2*time.Second)))
-			}
-		}
-	}()
-
-	enc := json.NewEncoder(w)
-	for {
-		select {
-		case report, ok := <-reportCh:
-			if !ok {
-				return
-			}
-			if err := enc.Encode(report); err != nil {
-				return
-			}
-			if len(reportCh) == 0 {
-				// Flush if nothing is queued
-				w.(http.Flusher).Flush()
-			}
-		case <-keepAliveTicker.C:
-			if _, err := w.Write([]byte(" ")); err != nil {
-				return
-			}
-			w.(http.Flusher).Flush()
-		case <-ctx.Done():
-			return
-		}
-	}
 }
 
 // ServerInfoHandler - GET /minio/admin/v3/info
@@ -2920,10 +2860,16 @@ func createHostAnonymizer() map[string]string {
 	}
 
 	hostAnonymizer := map[string]string{}
+	hosts := set.NewStringSet()
+	srvrIdx := 0
 
 	for poolIdx, pool := range globalEndpoints {
-		for srvrIdx, endpoint := range pool.Endpoints {
-			anonymizeHost(hostAnonymizer, endpoint, poolIdx+1, srvrIdx+1)
+		for _, endpoint := range pool.Endpoints {
+			if !hosts.Contains(endpoint.Host) {
+				hosts.Add(endpoint.Host)
+				srvrIdx++
+			}
+			anonymizeHost(hostAnonymizer, endpoint, poolIdx+1, srvrIdx)
 		}
 	}
 	return hostAnonymizer

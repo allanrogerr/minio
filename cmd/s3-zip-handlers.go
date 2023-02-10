@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/minio/minio/internal/auth"
 	"github.com/minio/minio/internal/crypto"
 	xhttp "github.com/minio/minio/internal/http"
 	xioutil "github.com/minio/minio/internal/ioutil"
@@ -64,10 +65,6 @@ func splitZipExtensionPath(input string) (zipPath, object string, err error) {
 // getObjectInArchiveFileHandler - GET Object in the archive file
 func (api objectAPIHandlers) getObjectInArchiveFileHandler(ctx context.Context, objectAPI ObjectLayer, bucket, object string, w http.ResponseWriter, r *http.Request) {
 	if crypto.S3.IsRequested(r.Header) || crypto.S3KMS.IsRequested(r.Header) { // If SSE-S3 or SSE-KMS present -> AWS fails with undefined error
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrBadRequest), r.URL)
-		return
-	}
-	if crypto.Requested(r.Header) && !objectAPI.IsEncryptionSupported() {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrBadRequest), r.URL)
 		return
 	}
@@ -109,7 +106,7 @@ func (api objectAPIHandlers) getObjectInArchiveFileHandler(ctx context.Context, 
 			if globalPolicySys.IsAllowed(policy.Args{
 				Action:          policy.ListBucketAction,
 				BucketName:      bucket,
-				ConditionValues: getConditionValues(r, "", "", nil),
+				ConditionValues: getConditionValues(r, "", auth.AnonymousCredentials),
 				IsOwner:         false,
 			}) {
 				_, err = getObjectInfo(ctx, bucket, zipPath, opts)
@@ -135,11 +132,9 @@ func (api objectAPIHandlers) getObjectInArchiveFileHandler(ctx context.Context, 
 
 	// Validate pre-conditions if any.
 	opts.CheckPrecondFn = func(oi ObjectInfo) bool {
-		if objectAPI.IsEncryptionSupported() {
-			if _, err := DecryptObjectInfo(&oi, r); err != nil {
-				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-				return true
-			}
+		if _, err := DecryptObjectInfo(&oi, r); err != nil {
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+			return true
 		}
 
 		return checkPreconditions(ctx, w, r, oi, opts)
@@ -381,10 +376,6 @@ func (api objectAPIHandlers) headObjectInArchiveFileHandler(ctx context.Context,
 		writeErrorResponseHeadersOnly(w, errorCodes.ToAPIErr(ErrBadRequest))
 		return
 	}
-	if crypto.Requested(r.Header) && !objectAPI.IsEncryptionSupported() {
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrBadRequest), r.URL)
-		return
-	}
 
 	zipPath, object, err := splitZipExtensionPath(object)
 	if err != nil {
@@ -421,7 +412,7 @@ func (api objectAPIHandlers) headObjectInArchiveFileHandler(ctx context.Context,
 			if globalPolicySys.IsAllowed(policy.Args{
 				Action:          policy.ListBucketAction,
 				BucketName:      bucket,
-				ConditionValues: getConditionValues(r, "", "", nil),
+				ConditionValues: getConditionValues(r, "", auth.AnonymousCredentials),
 				IsOwner:         false,
 			}) {
 				_, err = getObjectInfo(ctx, bucket, zipPath, opts)

@@ -180,20 +180,32 @@ func (t *transitionState) queueTransitionTask(oi ObjectInfo, sc string) {
 
 var globalTransitionState *transitionState
 
-func newTransitionState(ctx context.Context, objAPI ObjectLayer) *transitionState {
+// newTransitionState returns a transitionState object ready to be initialized
+// via its Init method.
+func newTransitionState(ctx context.Context) *transitionState {
 	return &transitionState{
 		transitionCh: make(chan transitionTask, 10000),
 		ctx:          ctx,
-		objAPI:       objAPI,
 		killCh:       make(chan struct{}),
 		lastDayStats: make(map[string]*lastDayTierStats),
 	}
 }
 
+// Init initializes t with given objAPI and instantiates the configured number
+// of transition workers.
+func (t *transitionState) Init(objAPI ObjectLayer) {
+	n := globalAPIConfig.getTransitionWorkers()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.objAPI = objAPI
+	t.updateWorkers(n)
+}
+
 // PendingTasks returns the number of ILM transition tasks waiting for a worker
 // goroutine.
 func (t *transitionState) PendingTasks() int {
-	return len(globalTransitionState.transitionCh)
+	return len(t.transitionCh)
 }
 
 // ActiveTasks returns the number of active (ongoing) ILM transition tasks.
@@ -258,7 +270,13 @@ func (t *transitionState) getDailyAllTierStats() DailyAllTierStats {
 func (t *transitionState) UpdateWorkers(n int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.objAPI == nil { // Init hasn't been called yet.
+		return
+	}
+	t.updateWorkers(n)
+}
 
+func (t *transitionState) updateWorkers(n int) {
 	for t.numWorkers < n {
 		go t.worker(t.ctx, t.objAPI)
 		t.numWorkers++
@@ -268,12 +286,6 @@ func (t *transitionState) UpdateWorkers(n int) {
 		go func() { t.killCh <- struct{}{} }()
 		t.numWorkers--
 	}
-}
-
-func initBackgroundTransition(ctx context.Context, objectAPI ObjectLayer) {
-	globalTransitionState = newTransitionState(ctx, objectAPI)
-	n := globalAPIConfig.getTransitionWorkers()
-	globalTransitionState.UpdateWorkers(n)
 }
 
 var errInvalidStorageClass = errors.New("invalid storage class")
@@ -660,7 +672,9 @@ func putRestoreOpts(bucket, object string, rreq *RestoreObjectRequest, objInfo O
 	if len(objInfo.UserTags) != 0 {
 		meta[xhttp.AmzObjectTagging] = objInfo.UserTags
 	}
-
+	// Set restore object status
+	restoreExpiry := lifecycle.ExpectedExpiryTime(time.Now().UTC(), rreq.Days)
+	meta[xhttp.AmzRestore] = completedRestoreObj(restoreExpiry).String()
 	return ObjectOptions{
 		Versioned:        globalBucketVersioningSys.PrefixEnabled(bucket, object),
 		VersionSuspended: globalBucketVersioningSys.PrefixSuspended(bucket, object),

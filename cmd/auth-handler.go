@@ -135,7 +135,7 @@ func getRequestAuthType(r *http.Request) authType {
 	return authTypeUnknown
 }
 
-func validateAdminSignature(ctx context.Context, r *http.Request, region string) (auth.Credentials, map[string]interface{}, bool, APIErrorCode) {
+func validateAdminSignature(ctx context.Context, r *http.Request, region string) (auth.Credentials, bool, APIErrorCode) {
 	var cred auth.Credentials
 	var owner bool
 	s3Err := ErrAccessDenied
@@ -144,24 +144,24 @@ func validateAdminSignature(ctx context.Context, r *http.Request, region string)
 		// We only support admin credentials to access admin APIs.
 		cred, owner, s3Err = getReqAccessKeyV4(r, region, serviceS3)
 		if s3Err != ErrNone {
-			return cred, nil, owner, s3Err
+			return cred, owner, s3Err
 		}
 
 		// we only support V4 (no presign) with auth body
 		s3Err = isReqAuthenticated(ctx, r, region, serviceS3)
 	}
 	if s3Err != ErrNone {
-		return cred, nil, owner, s3Err
+		return cred, owner, s3Err
 	}
 
-	return cred, cred.Claims, owner, ErrNone
+	return cred, owner, ErrNone
 }
 
 // checkAdminRequestAuth checks for authentication and authorization for the incoming
 // request. It only accepts V2 and V4 requests. Presigned, JWT and anonymous requests
 // are automatically rejected.
 func checkAdminRequestAuth(ctx context.Context, r *http.Request, action iampolicy.AdminAction, region string) (auth.Credentials, APIErrorCode) {
-	cred, claims, owner, s3Err := validateAdminSignature(ctx, r, region)
+	cred, owner, s3Err := validateAdminSignature(ctx, r, region)
 	if s3Err != ErrNone {
 		return cred, s3Err
 	}
@@ -169,9 +169,9 @@ func checkAdminRequestAuth(ctx context.Context, r *http.Request, action iampolic
 		AccountName:     cred.AccessKey,
 		Groups:          cred.Groups,
 		Action:          iampolicy.Action(action),
-		ConditionValues: getConditionValues(r, "", cred.AccessKey, claims),
+		ConditionValues: getConditionValues(r, "", cred),
 		IsOwner:         owner,
-		Claims:          claims,
+		Claims:          cred.Claims,
 	}) {
 		// Request is allowed return the appropriate access key.
 		return cred, ErrNone
@@ -300,6 +300,17 @@ func checkRequestAuthType(ctx context.Context, r *http.Request, action policy.Ac
 	return s3Err
 }
 
+// checkRequestAuthTypeWithVID is similar to checkRequestAuthType
+// passes versionID additionally.
+func checkRequestAuthTypeWithVID(ctx context.Context, r *http.Request, action policy.Action, bucketName, objectName, versionID string) (s3Err APIErrorCode) {
+	logger.GetReqInfo(ctx).BucketName = bucketName
+	logger.GetReqInfo(ctx).ObjectName = objectName
+	logger.GetReqInfo(ctx).VersionID = versionID
+
+	_, _, s3Err = checkRequestAuthTypeCredential(ctx, r, action)
+	return s3Err
+}
+
 func authenticateRequest(ctx context.Context, r *http.Request, action policy.Action) (s3Err APIErrorCode) {
 	if logger.GetReqInfo(ctx) == nil {
 		logger.LogIf(ctx, errors.New("unexpected context.Context does not have a logger.ReqInfo"), logger.Minio)
@@ -371,14 +382,16 @@ func authorizeRequest(ctx context.Context, r *http.Request, action policy.Action
 	region := reqInfo.Region
 	bucket := reqInfo.BucketName
 	object := reqInfo.ObjectName
+	versionID := reqInfo.VersionID
 
 	if action != policy.ListAllMyBucketsAction && cred.AccessKey == "" {
 		// Anonymous checks are not meant for ListAllBuckets action
 		if globalPolicySys.IsAllowed(policy.Args{
 			AccountName:     cred.AccessKey,
+			Groups:          cred.Groups,
 			Action:          action,
 			BucketName:      bucket,
-			ConditionValues: getConditionValues(r, region, "", nil),
+			ConditionValues: getConditionValues(r, region, auth.AnonymousCredentials),
 			IsOwner:         false,
 			ObjectName:      object,
 		}) {
@@ -391,9 +404,10 @@ func authorizeRequest(ctx context.Context, r *http.Request, action policy.Action
 			// verify as a fallback.
 			if globalPolicySys.IsAllowed(policy.Args{
 				AccountName:     cred.AccessKey,
+				Groups:          cred.Groups,
 				Action:          policy.ListBucketAction,
 				BucketName:      bucket,
-				ConditionValues: getConditionValues(r, region, "", nil),
+				ConditionValues: getConditionValues(r, region, auth.AnonymousCredentials),
 				IsOwner:         false,
 				ObjectName:      object,
 			}) {
@@ -404,13 +418,27 @@ func authorizeRequest(ctx context.Context, r *http.Request, action policy.Action
 
 		return ErrAccessDenied
 	}
-
+	if action == policy.DeleteObjectAction && versionID != "" {
+		if !globalIAMSys.IsAllowed(iampolicy.Args{
+			AccountName:     cred.AccessKey,
+			Groups:          cred.Groups,
+			Action:          iampolicy.Action(policy.DeleteObjectVersionAction),
+			BucketName:      bucket,
+			ConditionValues: getConditionValues(r, "", cred),
+			ObjectName:      object,
+			IsOwner:         owner,
+			Claims:          cred.Claims,
+			DenyOnly:        true,
+		}) { // Request is not allowed if Deny action on DeleteObjectVersionAction
+			return ErrAccessDenied
+		}
+	}
 	if globalIAMSys.IsAllowed(iampolicy.Args{
 		AccountName:     cred.AccessKey,
 		Groups:          cred.Groups,
 		Action:          iampolicy.Action(action),
 		BucketName:      bucket,
-		ConditionValues: getConditionValues(r, "", cred.AccessKey, cred.Claims),
+		ConditionValues: getConditionValues(r, "", cred),
 		ObjectName:      object,
 		IsOwner:         owner,
 		Claims:          cred.Claims,
@@ -427,7 +455,7 @@ func authorizeRequest(ctx context.Context, r *http.Request, action policy.Action
 			Groups:          cred.Groups,
 			Action:          iampolicy.ListBucketAction,
 			BucketName:      bucket,
-			ConditionValues: getConditionValues(r, "", cred.AccessKey, cred.Claims),
+			ConditionValues: getConditionValues(r, "", cred),
 			ObjectName:      object,
 			IsOwner:         owner,
 			Claims:          cred.Claims,
@@ -622,7 +650,7 @@ func isPutRetentionAllowed(bucketName, objectName string, retDays int, retDate t
 		return ErrAccessDenied
 	}
 
-	conditions := getConditionValues(r, "", cred.AccessKey, cred.Claims)
+	conditions := getConditionValues(r, "", cred)
 	conditions["object-lock-mode"] = []string{string(retMode)}
 	conditions["object-lock-retain-until-date"] = []string{retDate.UTC().Format(time.RFC3339)}
 	if retDays > 0 {
@@ -696,7 +724,7 @@ func isPutActionAllowed(ctx context.Context, atype authType, bucketName, objectN
 			Groups:          cred.Groups,
 			Action:          policy.Action(action),
 			BucketName:      bucketName,
-			ConditionValues: getConditionValues(r, "", "", nil),
+			ConditionValues: getConditionValues(r, "", auth.AnonymousCredentials),
 			IsOwner:         false,
 			ObjectName:      objectName,
 		}) {
@@ -710,7 +738,7 @@ func isPutActionAllowed(ctx context.Context, atype authType, bucketName, objectN
 		Groups:          cred.Groups,
 		Action:          action,
 		BucketName:      bucketName,
-		ConditionValues: getConditionValues(r, "", cred.AccessKey, cred.Claims),
+		ConditionValues: getConditionValues(r, "", cred),
 		ObjectName:      objectName,
 		IsOwner:         owner,
 		Claims:          cred.Claims,

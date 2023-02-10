@@ -208,6 +208,8 @@ const (
 	ErrSSEMultipartEncrypted
 	ErrSSEEncryptedObject
 	ErrInvalidEncryptionParameters
+	ErrInvalidEncryptionParametersSSEC
+
 	ErrInvalidSSECustomerAlgorithm
 	ErrInvalidSSECustomerKey
 	ErrMissingSSECustomerKey
@@ -1115,6 +1117,11 @@ var errorCodes = errorCodeMap{
 		Description:    "The encryption parameters are not applicable to this object.",
 		HTTPStatusCode: http.StatusBadRequest,
 	},
+	ErrInvalidEncryptionParametersSSEC: {
+		Code:           "InvalidRequest",
+		Description:    "SSE-C encryption parameters are not supported on replicated bucket.",
+		HTTPStatusCode: http.StatusBadRequest,
+	},
 	ErrInvalidSSECustomerAlgorithm: {
 		Code:           "InvalidArgument",
 		Description:    "Requests specifying Server Side Encryption with Customer provided keys must provide a valid encryption algorithm.",
@@ -2012,6 +2019,8 @@ func toAPIErrorCode(ctx context.Context, err error) (apiErr APIErrorCode) {
 	// SSE errors
 	case errInvalidEncryptionParameters:
 		apiErr = ErrInvalidEncryptionParameters
+	case errInvalidEncryptionParametersSSEC:
+		apiErr = ErrInvalidEncryptionParametersSSEC
 	case crypto.ErrInvalidEncryptionMethod:
 		apiErr = ErrInvalidEncryptionMethod
 	case crypto.ErrInvalidEncryptionKeyID:

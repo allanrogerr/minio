@@ -20,11 +20,11 @@ package cmd
 import (
 	"net/http"
 
-	"github.com/gorilla/mux"
 	"github.com/klauspost/compress/gzhttp"
 	"github.com/klauspost/compress/gzip"
 	"github.com/minio/madmin-go/v2"
 	"github.com/minio/minio/internal/logger"
+	"github.com/minio/mux"
 )
 
 const (
@@ -303,8 +303,6 @@ func registerAdminRouter(router *mux.Router, enableConfigOps bool) {
 		// -- Health API --
 		adminRouter.Methods(http.MethodGet).Path(adminVersion + "/healthinfo").
 			HandlerFunc(gz(httpTraceHdrs(adminAPI.HealthInfoHandler)))
-		adminRouter.Methods(http.MethodGet).Path(adminVersion + "/bandwidth").
-			HandlerFunc(gz(httpTraceHdrs(adminAPI.BandwidthMonitorHandler)))
 	}
 
 	// If none of the routes match add default error handler routes

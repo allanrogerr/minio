@@ -43,7 +43,6 @@ import (
 	"github.com/coreos/go-oidc"
 	"github.com/dustin/go-humanize"
 	"github.com/felixge/fgprof"
-	"github.com/gorilla/mux"
 	"github.com/minio/madmin-go/v2"
 	"github.com/minio/minio-go/v7"
 	miniogopolicy "github.com/minio/minio-go/v7/pkg/policy"
@@ -60,6 +59,7 @@ import (
 	"github.com/minio/minio/internal/logger/message/audit"
 	"github.com/minio/minio/internal/mcontext"
 	"github.com/minio/minio/internal/rest"
+	"github.com/minio/mux"
 	"github.com/minio/pkg/certs"
 	"github.com/minio/pkg/env"
 	xnet "github.com/minio/pkg/net"
@@ -608,7 +608,7 @@ func NewCustomHTTPProxyTransport() func() *http.Transport {
 func NewHTTPTransportWithClientCerts(clientCert, clientKey string) *http.Transport {
 	s := xhttp.ConnSettings{
 		DNSCache:    globalDNSCache,
-		DialTimeout: 1 * time.Minute,
+		DialTimeout: defaultDialTimeout,
 		RootCAs:     globalRootCAs,
 		EnableHTTP2: false,
 	}
@@ -676,7 +676,7 @@ func NewRemoteTargetHTTPTransport() func() *http.Transport {
 		DialContext: newCustomDialContext(),
 		RootCAs:     globalRootCAs,
 		EnableHTTP2: false,
-	}.NewCustomHTTPProxyTransport()
+	}.NewRemoteTargetHTTPTransport()
 }
 
 // Load the json (typically from disk file).

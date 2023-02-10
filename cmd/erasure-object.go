@@ -636,7 +636,10 @@ func (er erasureObjects) getObjectFileInfo(ctx context.Context, bucket, object s
 
 	if reducedErr := reduceReadQuorumErrs(ctx, errs, objectOpIgnoredErrs, readQuorum); reducedErr != nil {
 		if errors.Is(reducedErr, errErasureReadQuorum) && !strings.HasPrefix(bucket, minioMetaBucket) {
-			er.deleteIfDangling(ctx, bucket, object, metaArr, errs, nil, opts)
+			_, derr := er.deleteIfDangling(ctx, bucket, object, metaArr, errs, nil, opts)
+			if derr != nil {
+				reducedErr = derr
+			}
 		}
 		return fi, nil, nil, toObjectErr(reducedErr, bucket, object)
 	}
@@ -773,7 +776,10 @@ func renameData(ctx context.Context, disks []StorageAPI, srcBucket, srcEntry str
 	err := reduceWriteQuorumErrs(ctx, errs, objectOpIgnoredErrs, writeQuorum)
 	if err == nil {
 		versions := reduceCommonVersions(diskVersions, writeQuorum)
-		for _, dversions := range diskVersions {
+		for index, dversions := range diskVersions {
+			if errs[index] != nil {
+				continue
+			}
 			if versions != dversions {
 				versionsDisparity = true
 				break
@@ -961,7 +967,7 @@ func healObjectVersionsDisparity(bucket string, entry metaCacheEntry) error {
 
 	fivs, err := entry.fileInfoVersions(bucket)
 	if err != nil {
-		healObject(bucket, entry.name, "", madmin.HealNormalScan)
+		go healObject(bucket, entry.name, "", madmin.HealNormalScan)
 		return err
 	}
 
@@ -971,7 +977,7 @@ func healObjectVersionsDisparity(bucket string, entry metaCacheEntry) error {
 	}
 
 	for _, version := range fivs.Versions {
-		healObject(bucket, entry.name, version.VersionID, madmin.HealNormalScan)
+		go healObject(bucket, entry.name, version.VersionID, madmin.HealNormalScan)
 	}
 
 	return nil
@@ -2000,15 +2006,13 @@ func (er erasureObjects) RestoreTransitionedObject(ctx context.Context, bucket, 
 }
 
 // update restore status header in the metadata
-func (er erasureObjects) updateRestoreMetadata(ctx context.Context, bucket, object string, objInfo ObjectInfo, opts ObjectOptions, rerr error) error {
+func (er erasureObjects) updateRestoreMetadata(ctx context.Context, bucket, object string, objInfo ObjectInfo, opts ObjectOptions) error {
 	oi := objInfo.Clone()
 	oi.metadataOnly = true // Perform only metadata updates.
 
-	if rerr == nil {
-		oi.UserDefined[xhttp.AmzRestore] = completedRestoreObj(opts.Transition.RestoreExpiry).String()
-	} else { // allow retry in the case of failure to restore
-		delete(oi.UserDefined, xhttp.AmzRestore)
-	}
+	// allow retry in the case of failure to restore
+	delete(oi.UserDefined, xhttp.AmzRestore)
+
 	if _, err := er.CopyObject(ctx, bucket, object, bucket, object, oi, ObjectOptions{
 		VersionID: oi.VersionID,
 	}, ObjectOptions{
@@ -2024,7 +2028,10 @@ func (er erasureObjects) updateRestoreMetadata(ctx context.Context, bucket, obje
 // as in the xl.meta for this version and rehydrates the part.n into the fi.DataDir for this version as in the xl.meta
 func (er erasureObjects) restoreTransitionedObject(ctx context.Context, bucket string, object string, opts ObjectOptions) error {
 	setRestoreHeaderFn := func(oi ObjectInfo, rerr error) error {
-		er.updateRestoreMetadata(ctx, bucket, object, oi, opts, rerr)
+		if rerr == nil {
+			return nil // nothing to do; restore object was successful
+		}
+		er.updateRestoreMetadata(ctx, bucket, object, oi, opts)
 		return rerr
 	}
 	var oi ObjectInfo
@@ -2048,7 +2055,6 @@ func (er erasureObjects) restoreTransitionedObject(ctx context.Context, bucket s
 			return setRestoreHeaderFn(oi, toObjectErr(err, bucket, object))
 		}
 		pReader := NewPutObjReader(hashReader)
-		ropts.UserDefined[xhttp.AmzRestore] = completedRestoreObj(opts.Transition.RestoreExpiry).String()
 		_, err = er.PutObject(ctx, bucket, object, pReader, ropts)
 		return setRestoreHeaderFn(oi, toObjectErr(err, bucket, object))
 	}

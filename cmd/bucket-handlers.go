@@ -34,11 +34,12 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
-	"github.com/gorilla/mux"
+	"github.com/minio/mux"
 
 	"github.com/minio/madmin-go/v2"
 	"github.com/minio/minio-go/v7/pkg/set"
 	"github.com/minio/minio-go/v7/pkg/tags"
+	"github.com/minio/minio/internal/auth"
 	sse "github.com/minio/minio/internal/bucket/encryption"
 	objectlock "github.com/minio/minio/internal/bucket/object/lock"
 	"github.com/minio/minio/internal/bucket/replication"
@@ -359,7 +360,7 @@ func (api objectAPIHandlers) ListBucketsHandler(w http.ResponseWriter, r *http.R
 				Groups:          cred.Groups,
 				Action:          iampolicy.ListBucketAction,
 				BucketName:      bucketInfo.Name,
-				ConditionValues: getConditionValues(r, "", cred.AccessKey, cred.Claims),
+				ConditionValues: getConditionValues(r, "", cred),
 				IsOwner:         owner,
 				ObjectName:      "",
 				Claims:          cred.Claims,
@@ -371,7 +372,7 @@ func (api objectAPIHandlers) ListBucketsHandler(w http.ResponseWriter, r *http.R
 				Groups:          cred.Groups,
 				Action:          iampolicy.GetBucketLocationAction,
 				BucketName:      bucketInfo.Name,
-				ConditionValues: getConditionValues(r, "", cred.AccessKey, cred.Claims),
+				ConditionValues: getConditionValues(r, "", cred),
 				IsOwner:         owner,
 				ObjectName:      "",
 				Claims:          cred.Claims,
@@ -494,7 +495,7 @@ func (api objectAPIHandlers) DeleteMultipleObjectsHandler(w http.ResponseWriter,
 	vc, _ := globalBucketVersioningSys.Get(bucket)
 	oss := make([]*objSweeper, len(deleteObjectsReq.Objects))
 	for index, object := range deleteObjectsReq.Objects {
-		if apiErrCode := checkRequestAuthType(ctx, r, policy.DeleteObjectAction, bucket, object.ObjectName); apiErrCode != ErrNone {
+		if apiErrCode := checkRequestAuthTypeWithVID(ctx, r, policy.DeleteObjectAction, bucket, object.ObjectName, object.VersionID); apiErrCode != ErrNone {
 			if apiErrCode == ErrSignatureDoesNotMatch || apiErrCode == ErrInvalidAccessKeyID {
 				writeErrorResponse(ctx, w, errorCodes.ToAPIErr(apiErrCode), r.URL)
 				return
@@ -742,7 +743,7 @@ func (api objectAPIHandlers) PutBucketHandler(w http.ResponseWriter, r *http.Req
 				AccountName:     cred.AccessKey,
 				Groups:          cred.Groups,
 				Action:          action,
-				ConditionValues: getConditionValues(r, "", cred.AccessKey, cred.Claims),
+				ConditionValues: getConditionValues(r, "", cred),
 				BucketName:      bucket,
 				IsOwner:         owner,
 				Claims:          cred.Claims,
@@ -851,7 +852,7 @@ func (api objectAPIHandlers) PutBucketHandler(w http.ResponseWriter, r *http.Req
 	globalNotificationSys.LoadBucketMetadata(GlobalContext, bucket)
 
 	// Call site replication hook
-	globalSiteReplicationSys.MakeBucketHook(ctx, bucket, opts)
+	logger.LogIf(ctx, globalSiteReplicationSys.MakeBucketHook(ctx, bucket, opts))
 
 	// Make sure to add Location information here only for bucket
 	if cp := pathClean(r.URL.Path); cp != "" {
@@ -886,11 +887,6 @@ func (api objectAPIHandlers) PostPolicyBucketHandler(w http.ResponseWriter, r *h
 	}
 
 	if crypto.S3KMS.IsRequested(r.Header) { // SSE-KMS is not supported
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrNotImplemented), r.URL)
-		return
-	}
-
-	if crypto.Requested(r.Header) && !objectAPI.IsEncryptionSupported() {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrNotImplemented), r.URL)
 		return
 	}
@@ -988,7 +984,7 @@ func (api objectAPIHandlers) PostPolicyBucketHandler(w http.ResponseWriter, r *h
 		AccountName:     cred.AccessKey,
 		Groups:          cred.Groups,
 		Action:          iampolicy.PutObjectAction,
-		ConditionValues: getConditionValues(r, "", cred.AccessKey, cred.Claims),
+		ConditionValues: getConditionValues(r, "", cred),
 		BucketName:      bucket,
 		ObjectName:      object,
 		IsOwner:         globalActiveCred.AccessKey == cred.AccessKey,
@@ -1066,50 +1062,55 @@ func (api objectAPIHandlers) PostPolicyBucketHandler(w http.ResponseWriter, r *h
 		writeErrorResponseHeadersOnly(w, toAPIError(ctx, err))
 		return
 	}
-	if objectAPI.IsEncryptionSupported() {
-		if crypto.Requested(formValues) && !HasSuffix(object, SlashSeparator) { // handle SSE requests
-			if crypto.SSECopy.IsRequested(r.Header) {
-				writeErrorResponse(ctx, w, toAPIError(ctx, errInvalidEncryptionParameters), r.URL)
-				return
-			}
-			var (
-				reader io.Reader
-				keyID  string
-				key    []byte
-				kmsCtx kms.Context
-			)
-			kind, _ := crypto.IsRequested(formValues)
-			switch kind {
-			case crypto.SSEC:
-				key, err = ParseSSECustomerHeader(formValues)
-				if err != nil {
-					writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-					return
-				}
-			case crypto.S3KMS:
-				keyID, kmsCtx, err = crypto.S3KMS.ParseHTTP(formValues)
-				if err != nil {
-					writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-					return
-				}
-			}
-			reader, objectEncryptionKey, err = newEncryptReader(ctx, hashReader, kind, keyID, key, bucket, object, metadata, kmsCtx)
+
+	if crypto.Requested(formValues) {
+		if crypto.SSECopy.IsRequested(r.Header) {
+			writeErrorResponse(ctx, w, toAPIError(ctx, errInvalidEncryptionParameters), r.URL)
+			return
+		}
+
+		if crypto.SSEC.IsRequested(r.Header) && isReplicationEnabled(ctx, bucket) {
+			writeErrorResponse(ctx, w, toAPIError(ctx, errInvalidEncryptionParametersSSEC), r.URL)
+			return
+		}
+
+		var (
+			reader io.Reader
+			keyID  string
+			key    []byte
+			kmsCtx kms.Context
+		)
+		kind, _ := crypto.IsRequested(formValues)
+		switch kind {
+		case crypto.SSEC:
+			key, err = ParseSSECustomerHeader(formValues)
 			if err != nil {
 				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 				return
 			}
-			info := ObjectInfo{Size: fileSize}
-			// do not try to verify encrypted content
-			hashReader, err = hash.NewReader(reader, info.EncryptedSize(), "", "", fileSize)
+		case crypto.S3KMS:
+			keyID, kmsCtx, err = crypto.S3KMS.ParseHTTP(formValues)
 			if err != nil {
 				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 				return
 			}
-			pReader, err = pReader.WithEncryption(hashReader, &objectEncryptionKey)
-			if err != nil {
-				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-				return
-			}
+		}
+		reader, objectEncryptionKey, err = newEncryptReader(ctx, hashReader, kind, keyID, key, bucket, object, metadata, kmsCtx)
+		if err != nil {
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+			return
+		}
+		info := ObjectInfo{Size: fileSize}
+		// do not try to verify encrypted content
+		hashReader, err = hash.NewReader(reader, info.EncryptedSize(), "", "", fileSize)
+		if err != nil {
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+			return
+		}
+		pReader, err = pReader.WithEncryption(hashReader, &objectEncryptionKey)
+		if err != nil {
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+			return
 		}
 	}
 
@@ -1200,7 +1201,7 @@ func (api objectAPIHandlers) GetBucketPolicyStatusHandler(w http.ResponseWriter,
 	readable := globalPolicySys.IsAllowed(policy.Args{
 		Action:          policy.ListBucketAction,
 		BucketName:      bucket,
-		ConditionValues: getConditionValues(r, "", "", nil),
+		ConditionValues: getConditionValues(r, "", auth.AnonymousCredentials),
 		IsOwner:         false,
 	})
 
@@ -1208,7 +1209,7 @@ func (api objectAPIHandlers) GetBucketPolicyStatusHandler(w http.ResponseWriter,
 	writable := globalPolicySys.IsAllowed(policy.Args{
 		Action:          policy.PutObjectAction,
 		BucketName:      bucket,
-		ConditionValues: getConditionValues(r, "", "", nil),
+		ConditionValues: getConditionValues(r, "", auth.AnonymousCredentials),
 		IsOwner:         false,
 	})
 
@@ -1352,11 +1353,9 @@ func (api objectAPIHandlers) DeleteBucketHandler(w http.ResponseWriter, r *http.
 
 	globalNotificationSys.DeleteBucketMetadata(ctx, bucket)
 	globalReplicationPool.deleteResyncMetadata(ctx, bucket)
+
 	// Call site replication hook.
-	if err := globalSiteReplicationSys.DeleteBucketHook(ctx, bucket, forceDelete); err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-		return
-	}
+	logger.LogIf(ctx, globalSiteReplicationSys.DeleteBucketHook(ctx, bucket, forceDelete))
 
 	// Write success response.
 	writeSuccessNoContent(w)
@@ -1425,15 +1424,12 @@ func (api objectAPIHandlers) PutBucketObjectLockConfigHandler(w http.ResponseWri
 	// We encode the xml bytes as base64 to ensure there are no encoding
 	// errors.
 	cfgStr := base64.StdEncoding.EncodeToString(configData)
-	if err = globalSiteReplicationSys.BucketMetaHook(ctx, madmin.SRBucketMeta{
+	logger.LogIf(ctx, globalSiteReplicationSys.BucketMetaHook(ctx, madmin.SRBucketMeta{
 		Type:             madmin.SRBucketMetaTypeObjectLockConfig,
 		Bucket:           bucket,
 		ObjectLockConfig: &cfgStr,
 		UpdatedAt:        updatedAt,
-	}); err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-		return
-	}
+	}))
 
 	// Write success response.
 	writeSuccessResponseHeadersOnly(w)
@@ -1532,15 +1528,12 @@ func (api objectAPIHandlers) PutBucketTaggingHandler(w http.ResponseWriter, r *h
 	// We encode the xml bytes as base64 to ensure there are no encoding
 	// errors.
 	cfgStr := base64.StdEncoding.EncodeToString(configData)
-	if err = globalSiteReplicationSys.BucketMetaHook(ctx, madmin.SRBucketMeta{
+	logger.LogIf(ctx, globalSiteReplicationSys.BucketMetaHook(ctx, madmin.SRBucketMeta{
 		Type:      madmin.SRBucketMetaTypeTags,
 		Bucket:    bucket,
 		Tags:      &cfgStr,
 		UpdatedAt: updatedAt,
-	}); err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-		return
-	}
+	}))
 
 	// Write success response.
 	writeSuccessResponseHeadersOnly(w)
@@ -1611,14 +1604,11 @@ func (api objectAPIHandlers) DeleteBucketTaggingHandler(w http.ResponseWriter, r
 		return
 	}
 
-	if err := globalSiteReplicationSys.BucketMetaHook(ctx, madmin.SRBucketMeta{
+	logger.LogIf(ctx, globalSiteReplicationSys.BucketMetaHook(ctx, madmin.SRBucketMeta{
 		Type:      madmin.SRBucketMetaTypeTags,
 		Bucket:    bucket,
 		UpdatedAt: updatedAt,
-	}); err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-		return
-	}
+	}))
 
 	// Write success response.
 	writeSuccessResponseHeadersOnly(w)

@@ -354,10 +354,6 @@ func newErasureSets(ctx context.Context, endpoints PoolEndpoints, storageDisks [
 		endpointStrings[i] = endpoint.String()
 	}
 
-	if defaultParityCount == 0 {
-		logger.Error("Warning: Default parity set to 0. This can lead to data loss.")
-	}
-
 	// Initialize the erasure sets instance.
 	s := &erasureSets{
 		sets:               make([]*erasureObjects, setCount),
@@ -720,30 +716,6 @@ func (s *erasureSets) getHashedSetIndex(input string) int {
 // Returns always a same erasure coded set for a given input.
 func (s *erasureSets) getHashedSet(input string) (set *erasureObjects) {
 	return s.sets[s.getHashedSetIndex(input)]
-}
-
-// IsNotificationSupported returns whether bucket notification is applicable for this layer.
-func (s *erasureSets) IsNotificationSupported() bool {
-	return s.getHashedSet("").IsNotificationSupported()
-}
-
-// IsListenSupported returns whether listen bucket notification is applicable for this layer.
-func (s *erasureSets) IsListenSupported() bool {
-	return true
-}
-
-// IsEncryptionSupported returns whether server side encryption is implemented for this layer.
-func (s *erasureSets) IsEncryptionSupported() bool {
-	return s.getHashedSet("").IsEncryptionSupported()
-}
-
-// IsCompressionSupported returns whether compression is applicable for this layer.
-func (s *erasureSets) IsCompressionSupported() bool {
-	return s.getHashedSet("").IsCompressionSupported()
-}
-
-func (s *erasureSets) IsTaggingSupported() bool {
-	return true
 }
 
 // listDeletedBuckets lists deleted buckets from all disks.

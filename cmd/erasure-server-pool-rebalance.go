@@ -133,6 +133,11 @@ func (z *erasureServerPools) initRebalanceMeta(ctx context.Context, buckets []st
 	}, len(z.serverPools))
 	var totalCap, totalFree uint64
 	for _, disk := range si.Disks {
+		// Ignore invalid.
+		if disk.PoolIndex < 0 || len(diskStats) <= disk.PoolIndex {
+			// https://github.com/minio/minio/issues/16500
+			continue
+		}
 		totalCap += disk.TotalSpace
 		totalFree += disk.AvailableSpace
 
@@ -353,6 +358,7 @@ func (z *erasureServerPools) rebalanceBuckets(ctx context.Context, poolIdx int) 
 				z.rebalMu.Lock()
 				z.rebalMeta.PoolStats[poolIdx].Info.Status = rebalStopped
 				z.rebalMeta.PoolStats[poolIdx].Info.EndTime = now
+				z.rebalMeta.cancel = nil // remove the already used context.CancelFunc
 				z.rebalMu.Unlock()
 
 				rebalDone = true

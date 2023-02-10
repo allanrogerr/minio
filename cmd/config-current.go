@@ -297,15 +297,8 @@ func validateSubSysConfig(s config.Config, subSys string, objAPI ObjectLayer) er
 			return err
 		}
 	case config.CompressionSubSys:
-		compCfg, err := compress.LookupConfig(s[config.CompressionSubSys][config.Default])
-		if err != nil {
+		if _, err := compress.LookupConfig(s[config.CompressionSubSys][config.Default]); err != nil {
 			return err
-		}
-
-		if objAPI != nil {
-			if compCfg.Enabled && !objAPI.IsCompressionSupported() {
-				return fmt.Errorf("Backend does not support compression")
-			}
 		}
 	case config.HealSubSys:
 		if _, err := heal.LookupConfig(s[config.HealSubSys][config.Default]); err != nil {
@@ -548,10 +541,6 @@ func applyDynamicConfigForSubSys(ctx context.Context, objAPI ObjectLayer, s conf
 		if err != nil {
 			return fmt.Errorf("Unable to setup Compression: %w", err)
 		}
-		// Validate if the object layer supports compression.
-		if cmpCfg.Enabled && !objAPI.IsCompressionSupported() {
-			return fmt.Errorf("Backend does not support compression")
-		}
 		globalCompressConfigMu.Lock()
 		globalCompressConfig = cmpCfg
 		globalCompressConfigMu.Unlock()
@@ -712,37 +701,42 @@ func GetHelp(subSys, key string, envOnly bool) (Help, error) {
 		h = config.HelpKVS{value}
 	}
 
-	envHelp := config.HelpKVS{}
-	if envOnly {
-		// Only for multiple targets, make sure
-		// to list the ENV, for regular k/v EnableKey is
-		// implicit, for ENVs we cannot make it implicit.
-		if subSysHelp.MultipleTargets {
-			envK := config.EnvPrefix + strings.ToTitle(subSys) + config.EnvWordDelimiter + strings.ToTitle(madmin.EnableKey)
-			envHelp = append(envHelp, config.HelpKV{
-				Key:         envK,
-				Description: fmt.Sprintf("enable %s target, default is 'off'", subSys),
-				Optional:    false,
-				Type:        "on|off",
-			})
+	help := config.HelpKVS{}
+
+	// Only for multiple targets, make sure
+	// to list the ENV, for regular k/v EnableKey is
+	// implicit, for ENVs we cannot make it implicit.
+	if subSysHelp.MultipleTargets {
+		key := madmin.EnableKey
+		if envOnly {
+			key = config.EnvPrefix + strings.ToTitle(subSys) + config.EnvWordDelimiter + strings.ToTitle(madmin.EnableKey)
 		}
-		for _, hkv := range h {
-			envK := config.EnvPrefix + strings.ToTitle(subSys) + config.EnvWordDelimiter + strings.ToTitle(hkv.Key)
-			envHelp = append(envHelp, config.HelpKV{
-				Key:         envK,
-				Description: hkv.Description,
-				Optional:    hkv.Optional,
-				Type:        hkv.Type,
-			})
+		help = append(help, config.HelpKV{
+			Key:         key,
+			Description: fmt.Sprintf("enable %s target, default is 'off'", subSys),
+			Optional:    false,
+			Type:        "on|off",
+		})
+	}
+
+	for _, hkv := range h {
+		key := hkv.Key
+		if envOnly {
+			key = config.EnvPrefix + strings.ToTitle(subSys) + config.EnvWordDelimiter + strings.ToTitle(hkv.Key)
 		}
-		h = envHelp
+		help = append(help, config.HelpKV{
+			Key:         key,
+			Description: hkv.Description,
+			Optional:    hkv.Optional,
+			Type:        hkv.Type,
+		})
 	}
 
 	return Help{
 		SubSys:          subSys,
 		Description:     subSysHelp.Description,
 		MultipleTargets: subSysHelp.MultipleTargets,
-		KeysHelp:        h,
+		KeysHelp:        help,
 	}, nil
 }
 

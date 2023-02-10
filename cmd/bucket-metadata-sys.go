@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
@@ -40,6 +41,8 @@ import (
 
 // BucketMetadataSys captures all bucket metadata for a given cluster.
 type BucketMetadataSys struct {
+	objAPI ObjectLayer
+
 	sync.RWMutex
 	metadataMap map[string]BucketMetadata
 }
@@ -337,6 +340,20 @@ func (sys *BucketMetadataSys) GetBucketTargetsConfig(bucket string) (*madmin.Buc
 	return meta.bucketTargetConfig, nil
 }
 
+// GetConfigFromDisk read bucket metadata config from disk.
+func (sys *BucketMetadataSys) GetConfigFromDisk(ctx context.Context, bucket string) (BucketMetadata, error) {
+	objAPI := newObjectLayerFn()
+	if objAPI == nil {
+		return newBucketMetadata(bucket), errServerNotInitialized
+	}
+
+	if isMinioMetaBucketName(bucket) {
+		return newBucketMetadata(bucket), errInvalidArgument
+	}
+
+	return loadBucketMetadata(ctx, objAPI, bucket)
+}
+
 // GetConfig returns a specific configuration from the bucket metadata.
 // The returned object may not be modified.
 func (sys *BucketMetadataSys) GetConfig(ctx context.Context, bucket string) (BucketMetadata, error) {
@@ -372,39 +389,41 @@ func (sys *BucketMetadataSys) Init(ctx context.Context, buckets []BucketInfo, ob
 		return errServerNotInitialized
 	}
 
+	sys.objAPI = objAPI
+
 	// Load bucket metadata sys in background
-	go sys.load(ctx, buckets, objAPI)
+	go sys.init(ctx, buckets)
+	return nil
+}
+
+func (sys *BucketMetadataSys) loadBucketMetadata(ctx context.Context, bucket BucketInfo) error {
+	meta, err := loadBucketMetadata(ctx, sys.objAPI, bucket.Name)
+	if err != nil {
+		return err
+	}
+
+	sys.Lock()
+	sys.metadataMap[bucket.Name] = meta
+	sys.Unlock()
+
+	globalEventNotifier.set(bucket, meta)   // set notification targets
+	globalBucketTargetSys.set(bucket, meta) // set remote replication targets
+
 	return nil
 }
 
 // concurrently load bucket metadata to speed up loading bucket metadata.
-func (sys *BucketMetadataSys) concurrentLoad(ctx context.Context, buckets []BucketInfo, objAPI ObjectLayer) {
+func (sys *BucketMetadataSys) concurrentLoad(ctx context.Context, buckets []BucketInfo) {
 	g := errgroup.WithNErrs(len(buckets))
 	for index := range buckets {
 		index := index
 		g.Go(func() error {
-			_, _ = objAPI.HealBucket(ctx, buckets[index].Name, madmin.HealOpts{
+			_, _ = sys.objAPI.HealBucket(ctx, buckets[index].Name, madmin.HealOpts{
 				// Ensure heal opts for bucket metadata be deep healed all the time.
 				ScanMode: madmin.HealDeepScan,
 				Recreate: true,
 			})
-			meta, err := loadBucketMetadata(ctx, objAPI, buckets[index].Name)
-			if err != nil {
-				if !globalIsErasure && !globalIsDistErasure && errors.Is(err, errVolumeNotFound) {
-					meta = newBucketMetadata(buckets[index].Name)
-				} else {
-					return err
-				}
-			}
-			sys.Lock()
-			sys.metadataMap[buckets[index].Name] = meta
-			sys.Unlock()
-
-			globalEventNotifier.set(buckets[index], meta) // set notification targets
-
-			globalBucketTargetSys.set(buckets[index], meta) // set remote replication targets
-
-			return nil
+			return sys.loadBucketMetadata(ctx, buckets[index])
 		}, index)
 	}
 	for _, err := range g.Wait() {
@@ -414,16 +433,50 @@ func (sys *BucketMetadataSys) concurrentLoad(ctx context.Context, buckets []Buck
 	}
 }
 
+func (sys *BucketMetadataSys) refreshBucketsMetadataLoop(ctx context.Context) {
+	const bucketMetadataRefresh = 15 * time.Minute
+
+	t := time.NewTimer(bucketMetadataRefresh)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			buckets, err := sys.objAPI.ListBuckets(ctx, BucketOptions{})
+			if err != nil {
+				logger.LogIf(ctx, err)
+				continue
+			}
+			for i := range buckets {
+				err := sys.loadBucketMetadata(ctx, buckets[i])
+				if err != nil {
+					logger.LogIf(ctx, err)
+					continue
+				}
+				// Check if there is a spare core, wait 100ms instead
+				waitForLowIO(runtime.NumCPU(), 100*time.Millisecond, currentHTTPIO)
+			}
+
+			t.Reset(bucketMetadataRefresh)
+		}
+	}
+}
+
 // Loads bucket metadata for all buckets into BucketMetadataSys.
-func (sys *BucketMetadataSys) load(ctx context.Context, buckets []BucketInfo, objAPI ObjectLayer) {
+func (sys *BucketMetadataSys) init(ctx context.Context, buckets []BucketInfo) {
 	count := 100 // load 100 bucket metadata at a time.
 	for {
 		if len(buckets) < count {
-			sys.concurrentLoad(ctx, buckets, objAPI)
-			return
+			sys.concurrentLoad(ctx, buckets)
+			break
 		}
-		sys.concurrentLoad(ctx, buckets[:count], objAPI)
+		sys.concurrentLoad(ctx, buckets[:count])
 		buckets = buckets[count:]
+	}
+
+	if globalIsDistErasure {
+		go sys.refreshBucketsMetadataLoop(ctx)
 	}
 }
 

@@ -34,13 +34,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/gorilla/mux"
 	"github.com/klauspost/compress/gzhttp"
 	miniogo "github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/minio/minio-go/v7/pkg/encrypt"
 	"github.com/minio/minio-go/v7/pkg/tags"
 	"github.com/minio/minio/internal/amztime"
+	"github.com/minio/minio/internal/auth"
 	sse "github.com/minio/minio/internal/bucket/encryption"
 	"github.com/minio/minio/internal/bucket/lifecycle"
 	objectlock "github.com/minio/minio/internal/bucket/object/lock"
@@ -57,6 +57,7 @@ import (
 	"github.com/minio/minio/internal/kms"
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/minio/internal/s3select"
+	"github.com/minio/mux"
 	"github.com/minio/pkg/bucket/policy"
 	iampolicy "github.com/minio/pkg/iam/policy"
 	xnet "github.com/minio/pkg/net"
@@ -116,11 +117,6 @@ func (api objectAPIHandlers) SelectObjectContentHandler(w http.ResponseWriter, r
 		return
 	}
 
-	if crypto.Requested(r.Header) && !objectAPI.IsEncryptionSupported() {
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrBadRequest), r.URL)
-		return
-	}
-
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 	object, err := unescapePath(vars["object"])
@@ -160,7 +156,7 @@ func (api objectAPIHandlers) SelectObjectContentHandler(w http.ResponseWriter, r
 			if globalPolicySys.IsAllowed(policy.Args{
 				Action:          policy.ListBucketAction,
 				BucketName:      bucket,
-				ConditionValues: getConditionValues(r, "", "", nil),
+				ConditionValues: getConditionValues(r, "", auth.AnonymousCredentials),
 				IsOwner:         false,
 			}) {
 				_, err = getObjectInfo(ctx, bucket, object, opts)
@@ -224,11 +220,9 @@ func (api objectAPIHandlers) SelectObjectContentHandler(w http.ResponseWriter, r
 	// filter object lock metadata if permission does not permit
 	objInfo.UserDefined = objectlock.FilterObjectLockMetadata(objInfo.UserDefined, getRetPerms != ErrNone, legalHoldPerms != ErrNone)
 
-	if objectAPI.IsEncryptionSupported() {
-		if _, err = DecryptObjectInfo(&objInfo, r); err != nil {
-			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-			return
-		}
+	if _, err = DecryptObjectInfo(&objInfo, r); err != nil {
+		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+		return
 	}
 
 	actualSize, err := objInfo.GetActualSize()
@@ -288,25 +282,23 @@ func (api objectAPIHandlers) SelectObjectContentHandler(w http.ResponseWriter, r
 	}
 
 	// Set encryption response headers
-	if objectAPI.IsEncryptionSupported() {
-		switch kind, _ := crypto.IsEncrypted(objInfo.UserDefined); kind {
-		case crypto.S3:
-			w.Header().Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionAES)
-		case crypto.S3KMS:
-			w.Header().Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionKMS)
-			w.Header().Set(xhttp.AmzServerSideEncryptionKmsID, objInfo.KMSKeyID())
-			if kmsCtx, ok := objInfo.UserDefined[crypto.MetaContext]; ok {
-				w.Header().Set(xhttp.AmzServerSideEncryptionKmsContext, kmsCtx)
-			}
-		case crypto.SSEC:
-			// Validate the SSE-C Key set in the header.
-			if _, err = crypto.SSEC.UnsealObjectKey(r.Header, objInfo.UserDefined, bucket, object); err != nil {
-				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-				return
-			}
-			w.Header().Set(xhttp.AmzServerSideEncryptionCustomerAlgorithm, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerAlgorithm))
-			w.Header().Set(xhttp.AmzServerSideEncryptionCustomerKeyMD5, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerKeyMD5))
+	switch kind, _ := crypto.IsEncrypted(objInfo.UserDefined); kind {
+	case crypto.S3:
+		w.Header().Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionAES)
+	case crypto.S3KMS:
+		w.Header().Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionKMS)
+		w.Header().Set(xhttp.AmzServerSideEncryptionKmsID, objInfo.KMSKeyID())
+		if kmsCtx, ok := objInfo.UserDefined[crypto.MetaContext]; ok {
+			w.Header().Set(xhttp.AmzServerSideEncryptionKmsContext, kmsCtx)
 		}
+	case crypto.SSEC:
+		// Validate the SSE-C Key set in the header.
+		if _, err = crypto.SSEC.UnsealObjectKey(r.Header, objInfo.UserDefined, bucket, object); err != nil {
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+			return
+		}
+		w.Header().Set(xhttp.AmzServerSideEncryptionCustomerAlgorithm, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerAlgorithm))
+		w.Header().Set(xhttp.AmzServerSideEncryptionCustomerKeyMD5, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerKeyMD5))
 	}
 
 	s3Select.Evaluate(w)
@@ -325,10 +317,6 @@ func (api objectAPIHandlers) SelectObjectContentHandler(w http.ResponseWriter, r
 
 func (api objectAPIHandlers) getObjectHandler(ctx context.Context, objectAPI ObjectLayer, bucket, object string, w http.ResponseWriter, r *http.Request) {
 	if crypto.S3.IsRequested(r.Header) || crypto.S3KMS.IsRequested(r.Header) { // If SSE-S3 or SSE-KMS present -> AWS fails with undefined error
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrBadRequest), r.URL)
-		return
-	}
-	if crypto.Requested(r.Header) && !objectAPI.IsEncryptionSupported() {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrBadRequest), r.URL)
 		return
 	}
@@ -359,7 +347,7 @@ func (api objectAPIHandlers) getObjectHandler(ctx context.Context, objectAPI Obj
 			if globalPolicySys.IsAllowed(policy.Args{
 				Action:          policy.ListBucketAction,
 				BucketName:      bucket,
-				ConditionValues: getConditionValues(r, "", "", nil),
+				ConditionValues: getConditionValues(r, "", auth.AnonymousCredentials),
 				IsOwner:         false,
 			}) {
 				getObjectInfo := objectAPI.GetObjectInfo
@@ -401,18 +389,13 @@ func (api objectAPIHandlers) getObjectHandler(ctx context.Context, objectAPI Obj
 			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrInvalidRange), r.URL)
 			return
 		}
-		if rangeErr != nil {
-			logger.LogIf(ctx, rangeErr, logger.Application)
-		}
 	}
 
 	// Validate pre-conditions if any.
 	opts.CheckPrecondFn = func(oi ObjectInfo) bool {
-		if objectAPI.IsEncryptionSupported() {
-			if _, err := DecryptObjectInfo(&oi, r); err != nil {
-				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-				return true
-			}
+		if _, err := DecryptObjectInfo(&oi, r); err != nil {
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+			return true
 		}
 
 		return checkPreconditions(ctx, w, r, oi, opts)
@@ -431,7 +414,7 @@ func (api objectAPIHandlers) getObjectHandler(ctx context.Context, objectAPI Obj
 			reader, proxy, perr = proxyGetToReplicationTarget(ctx, bucket, object, rs, r.Header, opts, proxytgts)
 			if perr != nil {
 				proxyGetErr := ErrorRespToObjectError(perr, bucket, object)
-				if !isErrObjectNotFound(proxyGetErr) && !isErrVersionNotFound(proxyGetErr) &&
+				if !isErrBucketNotFound(proxyGetErr) && !isErrObjectNotFound(proxyGetErr) && !isErrVersionNotFound(proxyGetErr) &&
 					!isErrPreconditionFailed(proxyGetErr) && !isErrInvalidRange(proxyGetErr) {
 					logger.LogIf(ctx, fmt.Errorf("Proxying request (replication) failed for %s/%s(%s) - %w", bucket, object, opts.VersionID, perr))
 				}
@@ -519,20 +502,18 @@ func (api objectAPIHandlers) getObjectHandler(ctx context.Context, objectAPI Obj
 	objInfo.UserDefined = objectlock.FilterObjectLockMetadata(objInfo.UserDefined, getRetPerms != ErrNone, legalHoldPerms != ErrNone)
 
 	// Set encryption response headers
-	if objectAPI.IsEncryptionSupported() {
-		switch kind, _ := crypto.IsEncrypted(objInfo.UserDefined); kind {
-		case crypto.S3:
-			w.Header().Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionAES)
-		case crypto.S3KMS:
-			w.Header().Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionKMS)
-			w.Header().Set(xhttp.AmzServerSideEncryptionKmsID, objInfo.KMSKeyID())
-			if kmsCtx, ok := objInfo.UserDefined[crypto.MetaContext]; ok {
-				w.Header().Set(xhttp.AmzServerSideEncryptionKmsContext, kmsCtx)
-			}
-		case crypto.SSEC:
-			w.Header().Set(xhttp.AmzServerSideEncryptionCustomerAlgorithm, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerAlgorithm))
-			w.Header().Set(xhttp.AmzServerSideEncryptionCustomerKeyMD5, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerKeyMD5))
+	switch kind, _ := crypto.IsEncrypted(objInfo.UserDefined); kind {
+	case crypto.S3:
+		w.Header().Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionAES)
+	case crypto.S3KMS:
+		w.Header().Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionKMS)
+		w.Header().Set(xhttp.AmzServerSideEncryptionKmsID, objInfo.KMSKeyID())
+		if kmsCtx, ok := objInfo.UserDefined[crypto.MetaContext]; ok {
+			w.Header().Set(xhttp.AmzServerSideEncryptionKmsContext, kmsCtx)
 		}
+	case crypto.SSEC:
+		w.Header().Set(xhttp.AmzServerSideEncryptionCustomerAlgorithm, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerAlgorithm))
+		w.Header().Set(xhttp.AmzServerSideEncryptionCustomerKeyMD5, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerKeyMD5))
 	}
 
 	if r.Header.Get(xhttp.AmzChecksumMode) == "ENABLED" {
@@ -632,10 +613,6 @@ func (api objectAPIHandlers) headObjectHandler(ctx context.Context, objectAPI Ob
 		writeErrorResponseHeadersOnly(w, errorCodes.ToAPIErr(ErrBadRequest))
 		return
 	}
-	if crypto.Requested(r.Header) && !objectAPI.IsEncryptionSupported() {
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrBadRequest), r.URL)
-		return
-	}
 
 	getObjectInfo := objectAPI.GetObjectInfo
 	if api.CacheAPI() != nil {
@@ -668,7 +645,7 @@ func (api objectAPIHandlers) headObjectHandler(ctx context.Context, objectAPI Ob
 			if globalPolicySys.IsAllowed(policy.Args{
 				Action:          policy.ListBucketAction,
 				BucketName:      bucket,
-				ConditionValues: getConditionValues(r, "", "", nil),
+				ConditionValues: getConditionValues(r, "", auth.AnonymousCredentials),
 				IsOwner:         false,
 			}) {
 				getObjectInfo := objectAPI.GetObjectInfo
@@ -780,11 +757,9 @@ func (api objectAPIHandlers) headObjectHandler(ctx context.Context, objectAPI Ob
 	// filter object lock metadata if permission does not permit
 	objInfo.UserDefined = objectlock.FilterObjectLockMetadata(objInfo.UserDefined, getRetPerms != ErrNone, legalHoldPerms != ErrNone)
 
-	if objectAPI.IsEncryptionSupported() {
-		if _, err = DecryptObjectInfo(&objInfo, r); err != nil {
-			writeErrorResponseHeadersOnly(w, toAPIError(ctx, err))
-			return
-		}
+	if _, err = DecryptObjectInfo(&objInfo, r); err != nil {
+		writeErrorResponseHeadersOnly(w, toAPIError(ctx, err))
+		return
 	}
 
 	// Validate pre-conditions if any.
@@ -813,25 +788,23 @@ func (api objectAPIHandlers) headObjectHandler(ctx context.Context, objectAPI Ob
 	}
 
 	// Set encryption response headers
-	if objectAPI.IsEncryptionSupported() {
-		switch kind, _ := crypto.IsEncrypted(objInfo.UserDefined); kind {
-		case crypto.S3:
-			w.Header().Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionAES)
-		case crypto.S3KMS:
-			w.Header().Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionKMS)
-			w.Header().Set(xhttp.AmzServerSideEncryptionKmsID, objInfo.KMSKeyID())
-			if kmsCtx, ok := objInfo.UserDefined[crypto.MetaContext]; ok {
-				w.Header().Set(xhttp.AmzServerSideEncryptionKmsContext, kmsCtx)
-			}
-		case crypto.SSEC:
-			// Validate the SSE-C Key set in the header.
-			if _, err = crypto.SSEC.UnsealObjectKey(r.Header, objInfo.UserDefined, bucket, object); err != nil {
-				writeErrorResponseHeadersOnly(w, toAPIError(ctx, err))
-				return
-			}
-			w.Header().Set(xhttp.AmzServerSideEncryptionCustomerAlgorithm, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerAlgorithm))
-			w.Header().Set(xhttp.AmzServerSideEncryptionCustomerKeyMD5, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerKeyMD5))
+	switch kind, _ := crypto.IsEncrypted(objInfo.UserDefined); kind {
+	case crypto.S3:
+		w.Header().Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionAES)
+	case crypto.S3KMS:
+		w.Header().Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionKMS)
+		w.Header().Set(xhttp.AmzServerSideEncryptionKmsID, objInfo.KMSKeyID())
+		if kmsCtx, ok := objInfo.UserDefined[crypto.MetaContext]; ok {
+			w.Header().Set(xhttp.AmzServerSideEncryptionKmsContext, kmsCtx)
 		}
+	case crypto.SSEC:
+		// Validate the SSE-C Key set in the header.
+		if _, err = crypto.SSEC.UnsealObjectKey(r.Header, objInfo.UserDefined, bucket, object); err != nil {
+			writeErrorResponseHeadersOnly(w, toAPIError(ctx, err))
+			return
+		}
+		w.Header().Set(xhttp.AmzServerSideEncryptionCustomerAlgorithm, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerAlgorithm))
+		w.Header().Set(xhttp.AmzServerSideEncryptionCustomerKeyMD5, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerKeyMD5))
 	}
 
 	if r.Header.Get(xhttp.AmzChecksumMode) == "ENABLED" {
@@ -1016,13 +989,6 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	if crypto.Requested(r.Header) {
-		if !objectAPI.IsEncryptionSupported() {
-			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrNotImplemented), r.URL)
-			return
-		}
-	}
-
 	vars := mux.Vars(r)
 	dstBucket := vars["bucket"]
 	dstObject, err := unescapePath(vars["object"])
@@ -1128,11 +1094,9 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 	}
 
 	checkCopyPrecondFn := func(o ObjectInfo) bool {
-		if objectAPI.IsEncryptionSupported() {
-			if _, err := DecryptObjectInfo(&o, r); err != nil {
-				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-				return true
-			}
+		if _, err := DecryptObjectInfo(&o, r); err != nil {
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+			return true
 		}
 		return checkCopyObjectPreconditions(ctx, w, r, o)
 	}
@@ -1214,8 +1178,7 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 	var compressMetadata map[string]string
 	// No need to compress for remote etcd calls
 	// Pass the decompressed stream to such calls.
-	isDstCompressed := objectAPI.IsCompressionSupported() &&
-		isCompressible(r.Header, dstObject) &&
+	isDstCompressed := isCompressible(r.Header, dstObject) &&
 		length > minCompressibleSize &&
 		!isRemoteCopyRequired(ctx, srcBucket, dstBucket, objectAPI) && !cpSrcDstSame && !objectEncryption
 	if isDstCompressed {
@@ -1225,7 +1188,7 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		compressMetadata[ReservedMetadataPrefix+"actual-size"] = strconv.FormatInt(actualSize, 10)
 
 		reader = etag.NewReader(reader, nil)
-		wantEncryption := objectAPI.IsEncryptionSupported() && crypto.Requested(r.Header)
+		wantEncryption := crypto.Requested(r.Header)
 		s2c, cb := newS2CompressReader(reader, actualSize, wantEncryption)
 		dstOpts.IndexCB = cb
 		defer s2c.Close()
@@ -1247,133 +1210,131 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 
 	// Handle encryption
 	encMetadata := make(map[string]string)
-	if objectAPI.IsEncryptionSupported() {
-		// Encryption parameters not applicable for this object.
-		if _, ok := crypto.IsEncrypted(srcInfo.UserDefined); !ok && crypto.SSECopy.IsRequested(r.Header) {
-			writeErrorResponse(ctx, w, toAPIError(ctx, errInvalidEncryptionParameters), r.URL)
+	// Encryption parameters not applicable for this object.
+	if _, ok := crypto.IsEncrypted(srcInfo.UserDefined); !ok && crypto.SSECopy.IsRequested(r.Header) {
+		writeErrorResponse(ctx, w, toAPIError(ctx, errInvalidEncryptionParameters), r.URL)
+		return
+	}
+	// Encryption parameters not present for this object.
+	if crypto.SSEC.IsEncrypted(srcInfo.UserDefined) && !crypto.SSECopy.IsRequested(r.Header) {
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrInvalidSSECustomerAlgorithm), r.URL)
+		return
+	}
+
+	var oldKey, newKey []byte
+	var newKeyID string
+	var kmsCtx kms.Context
+	var objEncKey crypto.ObjectKey
+	sseCopyKMS := crypto.S3KMS.IsEncrypted(srcInfo.UserDefined)
+	sseCopyS3 := crypto.S3.IsEncrypted(srcInfo.UserDefined)
+	sseCopyC := crypto.SSEC.IsEncrypted(srcInfo.UserDefined) && crypto.SSECopy.IsRequested(r.Header)
+	sseC := crypto.SSEC.IsRequested(r.Header)
+	sseS3 := crypto.S3.IsRequested(r.Header)
+	sseKMS := crypto.S3KMS.IsRequested(r.Header)
+
+	isSourceEncrypted := sseCopyC || sseCopyS3 || sseCopyKMS
+	isTargetEncrypted := sseC || sseS3 || sseKMS
+
+	if sseC {
+		newKey, err = ParseSSECustomerRequest(r)
+		if err != nil {
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 			return
 		}
-		// Encryption parameters not present for this object.
-		if crypto.SSEC.IsEncrypted(srcInfo.UserDefined) && !crypto.SSECopy.IsRequested(r.Header) {
-			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrInvalidSSECustomerAlgorithm), r.URL)
+	}
+	if crypto.S3KMS.IsRequested(r.Header) {
+		newKeyID, kmsCtx, err = crypto.S3KMS.ParseHTTP(r.Header)
+		if err != nil {
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+			return
+		}
+	}
+
+	// If src == dst and either
+	// - the object is encrypted using SSE-C and two different SSE-C keys are present
+	// - the object is encrypted using SSE-S3 and the SSE-S3 header is present
+	// - the object storage class is not changing
+	// then execute a key rotation.
+	if cpSrcDstSame && (sseCopyC && sseC) && !chStorageClass {
+		oldKey, err = ParseSSECopyCustomerRequest(r.Header, srcInfo.UserDefined)
+		if err != nil {
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 			return
 		}
 
-		var oldKey, newKey []byte
-		var newKeyID string
-		var kmsCtx kms.Context
-		var objEncKey crypto.ObjectKey
-		sseCopyKMS := crypto.S3KMS.IsEncrypted(srcInfo.UserDefined)
-		sseCopyS3 := crypto.S3.IsEncrypted(srcInfo.UserDefined)
-		sseCopyC := crypto.SSEC.IsEncrypted(srcInfo.UserDefined) && crypto.SSECopy.IsRequested(r.Header)
-		sseC := crypto.SSEC.IsRequested(r.Header)
-		sseS3 := crypto.S3.IsRequested(r.Header)
-		sseKMS := crypto.S3KMS.IsRequested(r.Header)
-
-		isSourceEncrypted := sseCopyC || sseCopyS3 || sseCopyKMS
-		isTargetEncrypted := sseC || sseS3 || sseKMS
-
-		if sseC {
-			newKey, err = ParseSSECustomerRequest(r)
-			if err != nil {
-				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-				return
-			}
-		}
-		if crypto.S3KMS.IsRequested(r.Header) {
-			newKeyID, kmsCtx, err = crypto.S3KMS.ParseHTTP(r.Header)
-			if err != nil {
-				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-				return
+		for k, v := range srcInfo.UserDefined {
+			if strings.HasPrefix(strings.ToLower(k), ReservedMetadataPrefixLower) {
+				encMetadata[k] = v
 			}
 		}
 
-		// If src == dst and either
-		// - the object is encrypted using SSE-C and two different SSE-C keys are present
-		// - the object is encrypted using SSE-S3 and the SSE-S3 header is present
-		// - the object storage class is not changing
-		// then execute a key rotation.
-		if cpSrcDstSame && (sseCopyC && sseC) && !chStorageClass {
-			oldKey, err = ParseSSECopyCustomerRequest(r.Header, srcInfo.UserDefined)
+		if err = rotateKey(ctx, oldKey, newKeyID, newKey, srcBucket, srcObject, encMetadata, kmsCtx); err != nil {
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+			return
+		}
+
+		// Since we are rotating the keys, make sure to update the metadata.
+		srcInfo.metadataOnly = true
+		srcInfo.keyRotation = true
+	} else {
+		if isSourceEncrypted || isTargetEncrypted {
+			// We are not only copying just metadata instead
+			// we are creating a new object at this point, even
+			// if source and destination are same objects.
+			if !srcInfo.keyRotation {
+				srcInfo.metadataOnly = false
+			}
+		}
+
+		// Calculate the size of the target object
+		var targetSize int64
+
+		switch {
+		case isDstCompressed:
+			targetSize = -1
+		case !isSourceEncrypted && !isTargetEncrypted:
+			targetSize, _ = srcInfo.GetActualSize()
+		case isSourceEncrypted && isTargetEncrypted:
+			objInfo := ObjectInfo{Size: actualSize}
+			targetSize = objInfo.EncryptedSize()
+		case !isSourceEncrypted && isTargetEncrypted:
+			targetSize = srcInfo.EncryptedSize()
+		case isSourceEncrypted && !isTargetEncrypted:
+			targetSize, _ = srcInfo.DecryptedSize()
+		}
+
+		if isTargetEncrypted {
+			var encReader io.Reader
+			kind, _ := crypto.IsRequested(r.Header)
+			encReader, objEncKey, err = newEncryptReader(ctx, srcInfo.Reader, kind, newKeyID, newKey, dstBucket, dstObject, encMetadata, kmsCtx)
 			if err != nil {
 				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 				return
 			}
+			reader = etag.Wrap(encReader, srcInfo.Reader)
+		}
 
-			for k, v := range srcInfo.UserDefined {
-				if strings.HasPrefix(strings.ToLower(k), ReservedMetadataPrefixLower) {
-					encMetadata[k] = v
-				}
-			}
+		if isSourceEncrypted {
+			// Remove all source encrypted related metadata to
+			// avoid copying them in target object.
+			crypto.RemoveInternalEntries(srcInfo.UserDefined)
+		}
 
-			if err = rotateKey(ctx, oldKey, newKeyID, newKey, srcBucket, srcObject, encMetadata, kmsCtx); err != nil {
-				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-				return
-			}
+		// do not try to verify encrypted content
+		srcInfo.Reader, err = hash.NewReader(reader, targetSize, "", "", actualSize)
+		if err != nil {
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+			return
+		}
 
-			// Since we are rotating the keys, make sure to update the metadata.
-			srcInfo.metadataOnly = true
-			srcInfo.keyRotation = true
-		} else {
-			if isSourceEncrypted || isTargetEncrypted {
-				// We are not only copying just metadata instead
-				// we are creating a new object at this point, even
-				// if source and destination are same objects.
-				if !srcInfo.keyRotation {
-					srcInfo.metadataOnly = false
-				}
-			}
-
-			// Calculate the size of the target object
-			var targetSize int64
-
-			switch {
-			case isDstCompressed:
-				targetSize = -1
-			case !isSourceEncrypted && !isTargetEncrypted:
-				targetSize, _ = srcInfo.GetActualSize()
-			case isSourceEncrypted && isTargetEncrypted:
-				objInfo := ObjectInfo{Size: actualSize}
-				targetSize = objInfo.EncryptedSize()
-			case !isSourceEncrypted && isTargetEncrypted:
-				targetSize = srcInfo.EncryptedSize()
-			case isSourceEncrypted && !isTargetEncrypted:
-				targetSize, _ = srcInfo.DecryptedSize()
-			}
-
-			if isTargetEncrypted {
-				var encReader io.Reader
-				kind, _ := crypto.IsRequested(r.Header)
-				encReader, objEncKey, err = newEncryptReader(ctx, srcInfo.Reader, kind, newKeyID, newKey, dstBucket, dstObject, encMetadata, kmsCtx)
-				if err != nil {
-					writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-					return
-				}
-				reader = etag.Wrap(encReader, srcInfo.Reader)
-			}
-
-			if isSourceEncrypted {
-				// Remove all source encrypted related metadata to
-				// avoid copying them in target object.
-				crypto.RemoveInternalEntries(srcInfo.UserDefined)
-			}
-
-			// do not try to verify encrypted content
-			srcInfo.Reader, err = hash.NewReader(reader, targetSize, "", "", actualSize)
+		if isTargetEncrypted {
+			pReader, err = pReader.WithEncryption(srcInfo.Reader, &objEncKey)
 			if err != nil {
 				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 				return
 			}
-
-			if isTargetEncrypted {
-				pReader, err = pReader.WithEncryption(srcInfo.Reader, &objEncKey)
-				if err != nil {
-					writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-					return
-				}
-				if dstOpts.IndexCB != nil {
-					dstOpts.IndexCB = compressionIndexEncrypter(objEncKey, dstOpts.IndexCB)
-				}
+			if dstOpts.IndexCB != nil {
+				dstOpts.IndexCB = compressionIndexEncrypter(objEncKey, dstOpts.IndexCB)
 			}
 		}
 	}
@@ -1630,13 +1591,6 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if crypto.Requested(r.Header) {
-		if !objectAPI.IsEncryptionSupported() {
-			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrNotImplemented), r.URL)
-			return
-		}
-	}
-
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 	object, err := unescapePath(vars["object"])
@@ -1699,11 +1653,6 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 	}
 
 	if objTags := r.Header.Get(xhttp.AmzObjectTagging); objTags != "" {
-		if !objectAPI.IsTaggingSupported() {
-			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrNotImplemented), r.URL)
-			return
-		}
-
 		if _, err := tags.ParseObjectTags(objTags); err != nil {
 			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 			return
@@ -1773,7 +1722,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 
 	actualSize := size
 	var idxCb func() []byte
-	if objectAPI.IsCompressionSupported() && isCompressible(r.Header, object) && size > minCompressibleSize {
+	if isCompressible(r.Header, object) && size > minCompressibleSize {
 		// Storing the compression metadata.
 		metadata[ReservedMetadataPrefix+"compression"] = compressionAlgorithmV2
 		metadata[ReservedMetadataPrefix+"actual-size"] = strconv.FormatInt(size, 10)
@@ -1789,7 +1738,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		}
 		// Set compression metrics.
 		var s2c io.ReadCloser
-		wantEncryption := objectAPI.IsEncryptionSupported() && crypto.Requested(r.Header)
+		wantEncryption := crypto.Requested(r.Header)
 		s2c, idxCb = newS2CompressReader(actualReader, actualSize, wantEncryption)
 		defer s2c.Close()
 
@@ -1820,13 +1769,13 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 	}
 	opts.IndexCB = idxCb
 
-	if !opts.MTime.IsZero() && opts.PreserveETag != "" {
+	if (!opts.MTime.IsZero() && opts.PreserveETag != "") ||
+		r.Header.Get(xhttp.IfMatch) != "" ||
+		r.Header.Get(xhttp.IfNoneMatch) != "" {
 		opts.CheckPrecondFn = func(oi ObjectInfo) bool {
-			if objectAPI.IsEncryptionSupported() {
-				if _, err := DecryptObjectInfo(&oi, r); err != nil {
-					writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-					return true
-				}
+			if _, err := DecryptObjectInfo(&oi, r); err != nil {
+				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+				return true
 			}
 			return checkPreconditionsPUT(ctx, w, r, oi, opts)
 		}
@@ -1863,41 +1812,44 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		metadata[ReservedMetadataPrefixLower+ReplicationStatus] = dsc.PendingStatus()
 	}
 	var objectEncryptionKey crypto.ObjectKey
-	if objectAPI.IsEncryptionSupported() {
-		if crypto.Requested(r.Header) && !HasSuffix(object, SlashSeparator) { // handle SSE requests
-			if crypto.SSECopy.IsRequested(r.Header) {
-				writeErrorResponse(ctx, w, toAPIError(ctx, errInvalidEncryptionParameters), r.URL)
-				return
-			}
-
-			reader, objectEncryptionKey, err = EncryptRequest(hashReader, r, bucket, object, metadata)
-			if err != nil {
-				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-				return
-			}
-
-			wantSize := int64(-1)
-			if size >= 0 {
-				info := ObjectInfo{Size: size}
-				wantSize = info.EncryptedSize()
-			}
-
-			// do not try to verify encrypted content
-			hashReader, err = hash.NewReader(etag.Wrap(reader, hashReader), wantSize, "", "", actualSize)
-			if err != nil {
-				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-				return
-			}
-			pReader, err = pReader.WithEncryption(hashReader, &objectEncryptionKey)
-			if err != nil {
-				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-				return
-			}
-			if opts.IndexCB != nil {
-				opts.IndexCB = compressionIndexEncrypter(objectEncryptionKey, opts.IndexCB)
-			}
-			opts.EncryptFn = metadataEncrypter(objectEncryptionKey)
+	if crypto.Requested(r.Header) {
+		if crypto.SSECopy.IsRequested(r.Header) {
+			writeErrorResponse(ctx, w, toAPIError(ctx, errInvalidEncryptionParameters), r.URL)
+			return
 		}
+
+		if crypto.SSEC.IsRequested(r.Header) && isReplicationEnabled(ctx, bucket) {
+			writeErrorResponse(ctx, w, toAPIError(ctx, errInvalidEncryptionParametersSSEC), r.URL)
+			return
+		}
+
+		reader, objectEncryptionKey, err = EncryptRequest(hashReader, r, bucket, object, metadata)
+		if err != nil {
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+			return
+		}
+
+		wantSize := int64(-1)
+		if size >= 0 {
+			info := ObjectInfo{Size: size}
+			wantSize = info.EncryptedSize()
+		}
+
+		// do not try to verify encrypted content
+		hashReader, err = hash.NewReader(etag.Wrap(reader, hashReader), wantSize, "", "", actualSize)
+		if err != nil {
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+			return
+		}
+		pReader, err = pReader.WithEncryption(hashReader, &objectEncryptionKey)
+		if err != nil {
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+			return
+		}
+		if opts.IndexCB != nil {
+			opts.IndexCB = compressionIndexEncrypter(objectEncryptionKey, opts.IndexCB)
+		}
+		opts.EncryptFn = metadataEncrypter(objectEncryptionKey)
 	}
 
 	// Ensure that metadata does not contain sensitive information
@@ -1919,7 +1871,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if r.Header.Get(xMinIOExtract) == "true" && strings.HasSuffix(object, archiveExt) {
+	if r.Header.Get(xMinIOExtract) == "true" && HasSuffix(object, archiveExt) {
 		opts := ObjectOptions{VersionID: objInfo.VersionID, MTime: objInfo.ModTime}
 		if _, err := updateObjectMetadataWithZipInfo(ctx, objectAPI, bucket, object, opts); err != nil {
 			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
@@ -1999,13 +1951,6 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 	if crypto.S3KMS.IsRequested(r.Header) { // SSE-KMS is not supported
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrNotImplemented), r.URL)
 		return
-	}
-
-	if crypto.Requested(r.Header) {
-		if !objectAPI.IsEncryptionSupported() {
-			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrNotImplemented), r.URL)
-			return
-		}
 	}
 
 	vars := mux.Vars(r)
@@ -2145,7 +2090,7 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 
 		actualSize := size
 		var idxCb func() []byte
-		if objectAPI.IsCompressionSupported() && isCompressible(r.Header, object) && size > minCompressibleSize {
+		if isCompressible(r.Header, object) && size > minCompressibleSize {
 			// Storing the compression metadata.
 			metadata[ReservedMetadataPrefix+"compression"] = compressionAlgorithmV2
 			metadata[ReservedMetadataPrefix+"actual-size"] = strconv.FormatInt(size, 10)
@@ -2156,7 +2101,7 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 			}
 
 			// Set compression metrics.
-			wantEncryption := objectAPI.IsEncryptionSupported() && crypto.Requested(r.Header)
+			wantEncryption := crypto.Requested(r.Header)
 			s2c, cb := newS2CompressReader(actualReader, actualSize, wantEncryption)
 			defer s2c.Close()
 			idxCb = cb
@@ -2212,37 +2157,39 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 		}
 
 		var objectEncryptionKey crypto.ObjectKey
-		if objectAPI.IsEncryptionSupported() {
-			if crypto.Requested(r.Header) && !HasSuffix(object, SlashSeparator) { // handle SSE requests
-				if crypto.SSECopy.IsRequested(r.Header) {
-					return errInvalidEncryptionParameters
-				}
-
-				reader, objectEncryptionKey, err = EncryptRequest(hashReader, r, bucket, object, metadata)
-				if err != nil {
-					return err
-				}
-
-				wantSize := int64(-1)
-				if size >= 0 {
-					info := ObjectInfo{Size: size}
-					wantSize = info.EncryptedSize()
-				}
-
-				// do not try to verify encrypted content
-				hashReader, err = hash.NewReader(etag.Wrap(reader, hashReader), wantSize, "", "", actualSize)
-				if err != nil {
-					return err
-				}
-
-				pReader, err = pReader.WithEncryption(hashReader, &objectEncryptionKey)
-				if err != nil {
-					return err
-				}
+		if crypto.Requested(r.Header) {
+			if crypto.SSECopy.IsRequested(r.Header) {
+				return errInvalidEncryptionParameters
 			}
-			if opts.IndexCB != nil {
-				opts.IndexCB = compressionIndexEncrypter(objectEncryptionKey, opts.IndexCB)
+
+			if crypto.SSEC.IsRequested(r.Header) && isReplicationEnabled(ctx, bucket) {
+				return errInvalidEncryptionParametersSSEC
 			}
+
+			reader, objectEncryptionKey, err = EncryptRequest(hashReader, r, bucket, object, metadata)
+			if err != nil {
+				return err
+			}
+
+			wantSize := int64(-1)
+			if size >= 0 {
+				info := ObjectInfo{Size: size}
+				wantSize = info.EncryptedSize()
+			}
+
+			// do not try to verify encrypted content
+			hashReader, err = hash.NewReader(etag.Wrap(reader, hashReader), wantSize, "", "", actualSize)
+			if err != nil {
+				return err
+			}
+
+			pReader, err = pReader.WithEncryption(hashReader, &objectEncryptionKey)
+			if err != nil {
+				return err
+			}
+		}
+		if opts.IndexCB != nil {
+			opts.IndexCB = compressionIndexEncrypter(objectEncryptionKey, opts.IndexCB)
 		}
 
 		// Ensure that metadata does not contain sensitive information
@@ -2261,6 +2208,7 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 		}
 		return nil
 	}
+
 	var opts untarOptions
 	opts.ignoreDirs = strings.EqualFold(r.Header.Get(xhttp.MinIOSnowballIgnoreDirs), "true")
 	opts.ignoreErrs = strings.EqualFold(r.Header.Get(xhttp.MinIOSnowballIgnoreErrors), "true")
@@ -2827,11 +2775,6 @@ func (api objectAPIHandlers) GetObjectTaggingHandler(w http.ResponseWriter, r *h
 		return
 	}
 
-	if !objAPI.IsTaggingSupported() {
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrNotImplemented), r.URL)
-		return
-	}
-
 	// Allow getObjectTagging if policy action is set.
 	if s3Error := checkRequestAuthType(ctx, r, policy.GetObjectTaggingAction, bucket, object); s3Error != ErrNone {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
@@ -2887,10 +2830,6 @@ func (api objectAPIHandlers) PutObjectTaggingHandler(w http.ResponseWriter, r *h
 	objAPI := api.ObjectAPI()
 	if objAPI == nil {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrServerNotInitialized), r.URL)
-		return
-	}
-	if !objAPI.IsTaggingSupported() {
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrNotImplemented), r.URL)
 		return
 	}
 
@@ -2969,10 +2908,6 @@ func (api objectAPIHandlers) DeleteObjectTaggingHandler(w http.ResponseWriter, r
 	objAPI := api.ObjectAPI()
 	if objAPI == nil {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrServerNotInitialized), r.URL)
-		return
-	}
-	if !objAPI.IsTaggingSupported() {
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrNotImplemented), r.URL)
 		return
 	}
 
@@ -3119,7 +3054,7 @@ func (api objectAPIHandlers) PostRestoreObjectHandler(w http.ResponseWriter, r *
 		}
 	}
 	// set or upgrade restore expiry
-	restoreExpiry := lifecycle.ExpectedExpiryTime(time.Now(), rreq.Days)
+	restoreExpiry := lifecycle.ExpectedExpiryTime(time.Now().UTC(), rreq.Days)
 	metadata := cloneMSS(objInfo.UserDefined)
 
 	// update self with restore metadata

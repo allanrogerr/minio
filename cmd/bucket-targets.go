@@ -98,7 +98,7 @@ func (sys *BucketTargetSys) heartBeat(ctx context.Context) {
 		select {
 		case <-hcTimer.C:
 			sys.hMutex.RLock()
-			var eps []madmin.ServerProperties
+			eps := make([]madmin.ServerProperties, 0, len(sys.hc))
 			for _, ep := range sys.hc {
 				eps = append(eps, madmin.ServerProperties{Endpoint: ep.Endpoint, Scheme: ep.Scheme})
 			}
@@ -106,16 +106,12 @@ func (sys *BucketTargetSys) heartBeat(ctx context.Context) {
 
 			if len(eps) > 0 {
 				cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-				m := map[string]epHealth{}
+				m := make(map[string]epHealth, len(eps))
 				for result := range sys.hcClient.Alive(cctx, madmin.AliveOpts{}, eps...) {
-					var online bool
-					if result.Error == nil {
-						online = result.Online
-					}
 					m[result.Endpoint.Host] = epHealth{
 						Endpoint: result.Endpoint.Host,
 						Scheme:   result.Endpoint.Scheme,
-						Online:   online,
+						Online:   result.Online,
 					}
 				}
 				cancel()
@@ -269,18 +265,18 @@ func (sys *BucketTargetSys) SetTarget(ctx context.Context, bucket string, tgt *m
 
 	sys.targetsMap[bucket] = newtgts
 	sys.arnRemotesMap[tgt.Arn] = clnt
-	sys.updateBandwidthLimit(bucket, tgt.BandwidthLimit)
+	sys.updateBandwidthLimit(bucket, tgt.Arn, tgt.BandwidthLimit)
 	return nil
 }
 
-func (sys *BucketTargetSys) updateBandwidthLimit(bucket string, limit int64) {
+func (sys *BucketTargetSys) updateBandwidthLimit(bucket, arn string, limit int64) {
 	if limit == 0 {
-		globalBucketMonitor.DeleteBucket(bucket)
+		globalBucketMonitor.DeleteBucketThrottle(bucket, arn)
 		return
 	}
 	// Setup bandwidth throttling
 
-	globalBucketMonitor.SetBandwidthLimit(bucket, limit)
+	globalBucketMonitor.SetBandwidthLimit(bucket, arn, limit)
 }
 
 // RemoveTarget - removes a remote bucket target for this source bucket.
@@ -332,7 +328,7 @@ func (sys *BucketTargetSys) RemoveTarget(ctx context.Context, bucket, arnStr str
 	}
 	sys.targetsMap[bucket] = targets
 	delete(sys.arnRemotesMap, arnStr)
-	sys.updateBandwidthLimit(bucket, 0)
+	sys.updateBandwidthLimit(bucket, arnStr, 0)
 	return nil
 }
 
@@ -402,7 +398,7 @@ func (sys *BucketTargetSys) UpdateAllTargets(bucket string, tgts *madmin.BucketT
 
 	// No need for more if not adding anything
 	if tgts == nil || tgts.Empty() {
-		sys.updateBandwidthLimit(bucket, 0)
+		globalBucketMonitor.DeleteBucket(bucket)
 		return
 	}
 
@@ -415,7 +411,7 @@ func (sys *BucketTargetSys) UpdateAllTargets(bucket string, tgts *madmin.BucketT
 			continue
 		}
 		sys.arnRemotesMap[tgt.Arn] = tgtClient
-		sys.updateBandwidthLimit(bucket, tgt.BandwidthLimit)
+		sys.updateBandwidthLimit(bucket, tgt.Arn, tgt.BandwidthLimit)
 	}
 	sys.targetsMap[bucket] = tgts.Targets
 }
@@ -438,7 +434,7 @@ func (sys *BucketTargetSys) set(bucket BucketInfo, meta BucketMetadata) {
 			continue
 		}
 		sys.arnRemotesMap[tgt.Arn] = tgtClient
-		sys.updateBandwidthLimit(bucket.Name, tgt.BandwidthLimit)
+		sys.updateBandwidthLimit(bucket.Name, tgt.Arn, tgt.BandwidthLimit)
 	}
 	sys.targetsMap[bucket.Name] = cfg.Targets
 }

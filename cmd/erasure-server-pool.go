@@ -94,11 +94,14 @@ func newErasureServerPools(ctx context.Context, endpointServerPools EndpointServ
 		// -- Default for Standard Storage class is, parity = 3 - disks 6, 7
 		// -- Default for Standard Storage class is, parity = 4 - disks 8 to 16
 		if commonParityDrives == 0 {
-			commonParityDrives = ecDrivesNoConfig(ep.DrivesPerSet)
+			commonParityDrives, err = ecDrivesNoConfig(ep.DrivesPerSet)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		if err = storageclass.ValidateParity(commonParityDrives, ep.DrivesPerSet); err != nil {
-			return nil, fmt.Errorf("parity validation returned an error %w <- (%d, %d), for pool(%s)", err, commonParityDrives, ep.DrivesPerSet, humanize.Ordinal(i+1))
+			return nil, fmt.Errorf("parity validation returned an error: %w <- (%d, %d), for pool(%s)", err, commonParityDrives, ep.DrivesPerSet, humanize.Ordinal(i+1))
 		}
 
 		storageDisks[i], formats[i], err = waitForFormatErasure(local, ep.Endpoints, i+1,
@@ -184,10 +187,8 @@ func (z *erasureServerPools) GetDisksID(ids ...string) []StorageAPI {
 	}
 	res := make([]StorageAPI, 0, len(idMap))
 	for _, s := range z.serverPools {
-		s.erasureDisksMu.RLock()
-		defer s.erasureDisksMu.RUnlock()
-		for _, disks := range s.erasureDisks {
-			for _, disk := range disks {
+		for _, set := range s.sets {
+			for _, disk := range set.getDisks() {
 				if disk == OfflineDisk {
 					continue
 				}
@@ -208,8 +209,8 @@ func (z *erasureServerPools) GetDisksID(ids ...string) []StorageAPI {
 func (z *erasureServerPools) GetRawData(ctx context.Context, volume, file string, fn func(r io.Reader, host string, disk string, filename string, info StatInfo) error) error {
 	found := 0
 	for _, s := range z.serverPools {
-		for _, disks := range s.erasureDisks {
-			for _, disk := range disks {
+		for _, set := range s.sets {
+			for _, disk := range set.getDisks() {
 				if disk == OfflineDisk {
 					continue
 				}
@@ -1065,7 +1066,7 @@ func (z *erasureServerPools) DeleteObjects(ctx context.Context, bucket string, o
 					derrs[j] = err
 				}
 				dobjects[j] = DeletedObject{
-					ObjectName: obj.ObjectName,
+					ObjectName: decodeDirObject(obj.ObjectName),
 					VersionID:  obj.VersionID,
 				}
 				return nil
@@ -1077,7 +1078,7 @@ func (z *erasureServerPools) DeleteObjects(ctx context.Context, bucket string, o
 					DeleteMarker:          pinfo.ObjInfo.DeleteMarker,
 					DeleteMarkerVersionID: pinfo.ObjInfo.VersionID,
 					DeleteMarkerMTime:     DeleteMarkerMTime{pinfo.ObjInfo.ModTime},
-					ObjectName:            pinfo.ObjInfo.Name,
+					ObjectName:            decodeDirObject(pinfo.ObjInfo.Name),
 				}
 				return nil
 			}
@@ -1611,30 +1612,6 @@ func (z *erasureServerPools) GetBucketInfo(ctx context.Context, bucket string, o
 	return bucketInfo, nil
 }
 
-// IsNotificationSupported returns whether bucket notification is applicable for this layer.
-func (z *erasureServerPools) IsNotificationSupported() bool {
-	return true
-}
-
-// IsListenSupported returns whether listen bucket notification is applicable for this layer.
-func (z *erasureServerPools) IsListenSupported() bool {
-	return true
-}
-
-// IsEncryptionSupported returns whether server side encryption is implemented for this layer.
-func (z *erasureServerPools) IsEncryptionSupported() bool {
-	return true
-}
-
-// IsCompressionSupported returns whether compression is applicable for this layer.
-func (z *erasureServerPools) IsCompressionSupported() bool {
-	return true
-}
-
-func (z *erasureServerPools) IsTaggingSupported() bool {
-	return true
-}
-
 // DeleteBucket - deletes a bucket on all serverPools simultaneously,
 // even if one of the serverPools fail to delete buckets, we proceed to
 // undo a successful operation.
@@ -1665,7 +1642,7 @@ func (z *erasureServerPools) DeleteBucket(ctx context.Context, bucket string, op
 		// If site replication is configured, hold on to deleted bucket state until sites sync
 		switch opts.SRDeleteOp {
 		case MarkDelete:
-			z.markDelete(context.Background(), minioMetaBucket, pathJoin(bucketMetaPrefix, deletedBucketsPrefix, bucket))
+			z.s3Peer.MakeBucket(context.Background(), pathJoin(minioMetaBucket, bucketMetaPrefix, deletedBucketsPrefix, bucket), MakeBucketOptions{})
 		}
 	}
 
@@ -1692,27 +1669,6 @@ func (z *erasureServerPools) deleteAll(ctx context.Context, bucket, prefix strin
 	for _, servers := range z.serverPools {
 		for _, set := range servers.sets {
 			set.deleteAll(ctx, bucket, prefix)
-		}
-	}
-}
-
-// markDelete will create a directory of deleted bucket in .minio.sys/buckets/.deleted across all disks
-// in situations where the deleted bucket needs to be held on to until all sites are in sync for
-// site replication
-func (z *erasureServerPools) markDelete(ctx context.Context, bucket, prefix string) {
-	for _, servers := range z.serverPools {
-		for _, set := range servers.sets {
-			set.markDelete(ctx, bucket, prefix)
-		}
-	}
-}
-
-// purgeDelete deletes vol entry in .minio.sys/buckets/.deleted after site replication
-// syncs the delete to peers.
-func (z *erasureServerPools) purgeDelete(ctx context.Context, bucket, prefix string) {
-	for _, servers := range z.serverPools {
-		for _, set := range servers.sets {
-			set.purgeDelete(ctx, bucket, prefix)
 		}
 	}
 }

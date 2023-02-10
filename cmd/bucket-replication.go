@@ -74,6 +74,11 @@ const (
 	ReplicationWorkerMultiplier = 1.5
 )
 
+func isReplicationEnabled(ctx context.Context, bucketName string) bool {
+	rc, _ := getReplicationConfig(ctx, bucketName)
+	return rc != nil
+}
+
 // gets replication config associated to a given bucket name.
 func getReplicationConfig(ctx context.Context, bucketName string) (rc *replication.Config, err error) {
 	rCfg, _, err := globalBucketMetadataSys.GetReplicationConfig(ctx, bucketName)
@@ -1144,10 +1149,11 @@ func (ri ReplicateObjectInfo) replicateObject(ctx context.Context, objectAPI Obj
 
 	opts := &bandwidth.MonitorReaderOptions{
 		Bucket:     objInfo.Bucket,
+		TargetARN:  tgt.ARN,
 		HeaderSize: headerSize,
 	}
 	newCtx := ctx
-	if globalBucketMonitor.IsThrottled(bucket) {
+	if globalBucketMonitor.IsThrottled(bucket, tgt.ARN) {
 		var cancel context.CancelFunc
 		newCtx, cancel = context.WithTimeout(ctx, throttleDeadline)
 		defer cancel()
@@ -1156,14 +1162,14 @@ func (ri ReplicateObjectInfo) replicateObject(ctx context.Context, objectAPI Obj
 	if objInfo.isMultipart() {
 		if err := replicateObjectWithMultipart(ctx, c, tgt.Bucket, object,
 			r, objInfo, putOpts); err != nil {
-			if minio.ToErrorResponse(err).Code != "PreConditionFailed" {
+			if minio.ToErrorResponse(err).Code != "PreconditionFailed" {
 				rinfo.ReplicationStatus = replication.Failed
 				logger.LogIf(ctx, fmt.Errorf("Unable to replicate for object %s/%s(%s): %s", bucket, objInfo.Name, objInfo.VersionID, err))
 			}
 		}
 	} else {
 		if _, err = c.PutObject(ctx, tgt.Bucket, object, r, size, "", "", putOpts); err != nil {
-			if minio.ToErrorResponse(err).Code != "PreConditionFailed" {
+			if minio.ToErrorResponse(err).Code != "PreconditionFailed" {
 				rinfo.ReplicationStatus = replication.Failed
 				logger.LogIf(ctx, fmt.Errorf("Unable to replicate for object %s/%s(%s): %s", bucket, objInfo.Name, objInfo.VersionID, err))
 			}
@@ -1344,10 +1350,11 @@ func (ri ReplicateObjectInfo) replicateAll(ctx context.Context, objectAPI Object
 
 		opts := &bandwidth.MonitorReaderOptions{
 			Bucket:     objInfo.Bucket,
+			TargetARN:  tgt.ARN,
 			HeaderSize: headerSize,
 		}
 		newCtx := ctx
-		if globalBucketMonitor.IsThrottled(bucket) {
+		if globalBucketMonitor.IsThrottled(bucket, tgt.ARN) {
 			var cancel context.CancelFunc
 			newCtx, cancel = context.WithTimeout(ctx, throttleDeadline)
 			defer cancel()
@@ -1356,13 +1363,21 @@ func (ri ReplicateObjectInfo) replicateAll(ctx context.Context, objectAPI Object
 		if objInfo.isMultipart() {
 			if err := replicateObjectWithMultipart(ctx, c, tgt.Bucket, object,
 				r, objInfo, putOpts); err != nil {
-				rinfo.ReplicationStatus = replication.Failed
-				logger.LogIf(ctx, fmt.Errorf("Unable to replicate for object %s/%s(%s): %s", bucket, objInfo.Name, objInfo.VersionID, err))
+				if minio.ToErrorResponse(err).Code != "PreconditionFailed" {
+					rinfo.ReplicationStatus = replication.Failed
+					logger.LogIf(ctx, fmt.Errorf("Unable to replicate for object %s/%s(%s): %s", bucket, objInfo.Name, objInfo.VersionID, err))
+				} else {
+					rinfo.ReplicationStatus = replication.Completed
+				}
 			}
 		} else {
 			if _, err = c.PutObject(ctx, tgt.Bucket, object, r, size, "", "", putOpts); err != nil {
-				rinfo.ReplicationStatus = replication.Failed
-				logger.LogIf(ctx, fmt.Errorf("Unable to replicate for object %s/%s(%s): %s", bucket, objInfo.Name, objInfo.VersionID, err))
+				if minio.ToErrorResponse(err).Code != "PreconditionFailed" {
+					rinfo.ReplicationStatus = replication.Failed
+					logger.LogIf(ctx, fmt.Errorf("Unable to replicate for object %s/%s(%s): %s", bucket, objInfo.Name, objInfo.VersionID, err))
+				} else {
+					rinfo.ReplicationStatus = replication.Completed
+				}
 			}
 		}
 	}
@@ -1903,7 +1918,7 @@ func proxyGetToReplicationTarget(ctx context.Context, bucket, object string, rs 
 		return nil, proxy, err
 	}
 	c := minio.Core{Client: tgt.Client}
-	obj, _, h, err := c.GetObject(ctx, bucket, object, gopts)
+	obj, _, h, err := c.GetObject(ctx, tgt.Bucket, object, gopts)
 	if err != nil {
 		return nil, proxy, err
 	}
@@ -1928,7 +1943,7 @@ func getProxyTargets(ctx context.Context, bucket, object string, opts ObjectOpti
 	if opts.VersionSuspended {
 		return &madmin.BucketTargets{}
 	}
-	if !opts.ProxyRequest {
+	if opts.ProxyRequest || (opts.ProxyHeaderSet && !opts.ProxyRequest) {
 		return &madmin.BucketTargets{}
 	}
 	cfg, err := getReplicationConfig(ctx, bucket)

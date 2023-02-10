@@ -24,16 +24,16 @@ import (
 	"net/http"
 	"sort"
 
-	"github.com/gorilla/mux"
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/minio/internal/sync/errgroup"
+	"github.com/minio/mux"
 )
 
 const (
 	peerS3Version = "v1" // First implementation
 
 	peerS3VersionPrefix = SlashSeparator + peerS3Version
-	peerS3Prefix        = minioReservedBucketPath + "/peer"
+	peerS3Prefix        = minioReservedBucketPath + "/peer-s3"
 	peerS3Path          = peerS3Prefix + peerS3VersionPrefix
 )
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2022 MinIO, Inc.
+// Copyright (c) 2015-2023 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
 //
@@ -19,6 +19,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -42,6 +43,7 @@ import (
 	"github.com/minio/minio/internal/bucket/bandwidth"
 	"github.com/minio/minio/internal/color"
 	"github.com/minio/minio/internal/config"
+	"github.com/minio/minio/internal/hash/sha256"
 	xhttp "github.com/minio/minio/internal/http"
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/pkg/certs"
@@ -221,6 +223,8 @@ func serverHandleCmdArgs(ctx *cli.Context) {
 	logger.FatalIf(err, "Invalid command line arguments")
 
 	globalLocalNodeName = GetLocalPeer(globalEndpoints, globalMinioHost, globalMinioPort)
+	nodeNameSum := sha256.Sum256([]byte(globalLocalNodeNameHex))
+	globalLocalNodeNameHex = hex.EncodeToString(nodeNameSum[:])
 
 	globalRemoteEndpoints = make(map[string]Endpoint)
 	for _, z := range globalEndpoints {
@@ -319,6 +323,7 @@ func initAllSubsystems(ctx context.Context) {
 	// Create new ILM tier configuration subsystem
 	globalTierConfigMgr = NewTierConfigMgr()
 
+	globalTransitionState = newTransitionState(GlobalContext)
 	globalSiteResyncMetrics = newSiteResyncMetrics(GlobalContext)
 }
 
@@ -461,7 +466,7 @@ func initConfigSubsystem(ctx context.Context, newObject ObjectLayer) error {
 		}
 
 		// Any other config errors we simply print a message and proceed forward.
-		logger.LogIf(ctx, fmt.Errorf("Unable to initialize config, some features may be missing %w", err))
+		logger.LogIf(ctx, fmt.Errorf("Unable to initialize config, some features may be missing: %w", err))
 	}
 
 	return nil
@@ -664,50 +669,34 @@ func serverMain(ctx *cli.Context) {
 
 	// Background all other operations such as initializing bucket metadata etc.
 	go func() {
-		// Initialize transition tier configuration manager
-		initBackgroundReplication(GlobalContext, newObject)
-		initBackgroundTransition(GlobalContext, newObject)
+		// Initialize data scanner.
+		initDataScanner(GlobalContext, newObject)
 
+		// Initialize background replication
+		initBackgroundReplication(GlobalContext, newObject)
+
+		globalTransitionState.Init(newObject)
+
+		// Initialize batch job pool.
 		globalBatchJobPool = newBatchJobPool(GlobalContext, newObject, 100)
 
+		// Initialize the license update job
+		initLicenseUpdateJob(GlobalContext, newObject)
+
 		go func() {
+			// Initialize transition tier configuration manager
 			err := globalTierConfigMgr.Init(GlobalContext, newObject)
 			if err != nil {
 				logger.LogIf(GlobalContext, err)
-			}
-
-			globalTierJournal, err = initTierDeletionJournal(GlobalContext)
-			if err != nil {
-				logger.FatalIf(err, "Unable to initialize remote tier pending deletes journal")
+			} else {
+				globalTierJournal, err = initTierDeletionJournal(GlobalContext)
+				if err != nil {
+					logger.FatalIf(err, "Unable to initialize remote tier pending deletes journal")
+				}
 			}
 		}()
 
-		// Initialize quota manager.
-		globalBucketQuotaSys.Init(newObject)
-
-		initDataScanner(GlobalContext, newObject)
-
-		// List buckets to heal, and be re-used for loading configs.
-		buckets, err := newObject.ListBuckets(GlobalContext, BucketOptions{})
-		if err != nil {
-			logger.LogIf(GlobalContext, fmt.Errorf("Unable to list buckets to heal: %w", err))
-		}
-		// initialize replication resync state.
-		go globalReplicationPool.initResync(GlobalContext, buckets, newObject)
-
-		// Populate existing buckets to the etcd backend
-		if globalDNSConfig != nil {
-			// Background this operation.
-			go initFederatorBackend(buckets, newObject)
-		}
-
-		// Initialize bucket metadata sub-system.
-		globalBucketMetadataSys.Init(GlobalContext, buckets, newObject)
-
-		// Initialize site replication manager.
-		globalSiteReplicationSys.Init(GlobalContext, newObject)
-
-		// Initialize bucket notification system
+		// Initialize bucket notification system first before loading bucket metadata.
 		logger.LogIf(GlobalContext, globalEventNotifier.InitBucketTargets(GlobalContext, newObject))
 
 		// initialize the new disk cache objects.
@@ -720,8 +709,36 @@ func serverMain(ctx *cli.Context) {
 			setCacheObjectLayer(cacheAPI)
 		}
 
+		// List buckets to heal, and be re-used for loading configs.
+		buckets, err := newObject.ListBuckets(GlobalContext, BucketOptions{})
+		if err != nil {
+			logger.LogIf(GlobalContext, fmt.Errorf("Unable to list buckets to heal: %w", err))
+		}
+		// initialize replication resync state.
+		go globalReplicationPool.initResync(GlobalContext, buckets, newObject)
+
+		// Initialize bucket metadata sub-system.
+		globalBucketMetadataSys.Init(GlobalContext, buckets, newObject)
+
+		// Initialize site replication manager after bucket metadat
+		globalSiteReplicationSys.Init(GlobalContext, newObject)
+
+		// Initialize quota manager.
+		globalBucketQuotaSys.Init(newObject)
+
+		// Populate existing buckets to the etcd backend
+		if globalDNSConfig != nil {
+			// Background this operation.
+			go initFederatorBackend(buckets, newObject)
+		}
+
 		// Prints the formatted startup message, if err is not nil then it prints additional information as well.
 		printStartupMessage(getAPIEndpoints(), err)
+
+		// Print a warning at the end of the startup banner so it is more noticeable
+		if globalStorageClass.GetParityForSC("") == 0 {
+			logger.Error("Warning: The standard parity is set to 0. This can lead to data loss.")
+		}
 	}()
 
 	region := globalSite.Region

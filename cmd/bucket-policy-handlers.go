@@ -24,9 +24,9 @@ import (
 	"net/http"
 
 	humanize "github.com/dustin/go-humanize"
-	"github.com/gorilla/mux"
 	"github.com/minio/madmin-go/v2"
 	"github.com/minio/minio/internal/logger"
+	"github.com/minio/mux"
 	"github.com/minio/pkg/bucket/policy"
 )
 
@@ -109,15 +109,12 @@ func (api objectAPIHandlers) PutBucketPolicyHandler(w http.ResponseWriter, r *ht
 	}
 
 	// Call site replication hook.
-	if err = globalSiteReplicationSys.BucketMetaHook(ctx, madmin.SRBucketMeta{
+	logger.LogIf(ctx, globalSiteReplicationSys.BucketMetaHook(ctx, madmin.SRBucketMeta{
 		Type:      madmin.SRBucketMetaTypePolicy,
 		Bucket:    bucket,
 		Policy:    bucketPolicyBytes,
 		UpdatedAt: updatedAt,
-	}); err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-		return
-	}
+	}))
 
 	// Success.
 	writeSuccessNoContent(w)
@@ -156,14 +153,11 @@ func (api objectAPIHandlers) DeleteBucketPolicyHandler(w http.ResponseWriter, r 
 	}
 
 	// Call site replication hook.
-	if err := globalSiteReplicationSys.BucketMetaHook(ctx, madmin.SRBucketMeta{
+	logger.LogIf(ctx, globalSiteReplicationSys.BucketMetaHook(ctx, madmin.SRBucketMeta{
 		Type:      madmin.SRBucketMetaTypePolicy,
 		Bucket:    bucket,
 		UpdatedAt: updatedAt,
-	}); err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-		return
-	}
+	}))
 
 	// Success.
 	writeSuccessNoContent(w)
