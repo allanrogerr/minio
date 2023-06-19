@@ -1,5 +1,5 @@
 ---
-name: Bug report
+name: Bug report 2
 about: Create a report to help us improve
 title: ''
 labels: community, triage
@@ -7,7 +7,7 @@ assignees: ''
 
 ---
 
-## NOTE
+## NOTE 2
 If this case is urgent, please subscribe to [Subnet](https://min.io/pricing) so that our 24/7 support team may help you faster.
 
 <!--- Provide a general summary of the issue in the Title above -->
