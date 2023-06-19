@@ -1,5 +1,5 @@
 ---
-name: Bug report
+name: Bug report Test1
 about: Create a report to help us improve
 title: ''
 labels: community, triage
