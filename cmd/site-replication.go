@@ -396,7 +396,7 @@ func (c *SiteReplicationSys) AddPeerClusters(ctx context.Context, psites []madmi
 	for i, v := range sites {
 		// deploymentIDs must be unique
 		if deploymentIDsSet.Contains(v.DeploymentID) {
-			return madmin.ReplicateAddStatus{}, errSRDuplicateSites
+			return madmin.ReplicateAddStatus{}, errSRBackendIssue(fmt.Errorf("duplicate sites provided for site-replication - %s - %s", deploymentIDsSet, v.DeploymentID))
 		}
 		deploymentIDsSet.Add(v.DeploymentID)
 
