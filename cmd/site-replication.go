@@ -341,6 +341,7 @@ type PeerSiteInfo struct {
 func (c *SiteReplicationSys) getSiteStatuses(ctx context.Context, sites ...madmin.PeerSite) (psi []PeerSiteInfo, err error) {
 	psi = make([]PeerSiteInfo, 0, len(sites))
 	for _, v := range sites {
+		logger.Info(fmt.Sprintf("%v %v %v %v %v", "Working on sites", v.Name, v.Endpoint, v.AccessKey, v.SecretKey))
 		admClient, err := getAdminClient(v.Endpoint, v.AccessKey, v.SecretKey)
 		if err != nil {
 			return psi, errSRPeerResp(fmt.Errorf("unable to create admin client for %s: %w", v.Name, err))
@@ -350,6 +351,7 @@ func (c *SiteReplicationSys) getSiteStatuses(ctx context.Context, sites ...madmi
 		if err != nil {
 			return psi, errSRPeerResp(fmt.Errorf("unable to fetch server info for %s: %w", v.Name, err))
 		}
+		logger.Info(fmt.Sprintf("%v %v %v %v", "admClient.ServerInfo(ctx)", v.Name, v.Endpoint, info.DeploymentID))
 
 		s3Client, err := getS3Client(v)
 		if err != nil {
