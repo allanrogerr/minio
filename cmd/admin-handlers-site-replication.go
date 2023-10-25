@@ -23,6 +23,7 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -46,10 +47,12 @@ func (a adminAPIHandlers) SiteReplicationAdd(w http.ResponseWriter, r *http.Requ
 	}
 
 	var sites []madmin.PeerSite
+	logger.Info(fmt.Sprintf("%v - %v", "PeerSite body", r.Body))
 	if err := parseJSONBody(ctx, r.Body, &sites, cred.SecretKey); err != nil {
 		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
 		return
 	}
+	logger.Info(fmt.Sprintf("%v - %v", "PeerSite sites", sites))
 
 	status, err := globalSiteReplicationSys.AddPeerClusters(ctx, sites)
 	if err != nil {
