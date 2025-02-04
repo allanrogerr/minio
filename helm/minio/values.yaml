@@ -25,8 +25,8 @@ imagePullSecrets: []
 ##
 mcImage:
   repository: quay.io/minio/mc
-  tag: RELEASE.2024-11-21T17-21-54Z
-  pullPolicy: IfNotPresent
+  tag: dev#RELEASE.2024-11-21T17-21-54Z
+  pullPolicy: Never #IfNotPresent
 
 ## minio mode, i.e. standalone or distributed
 mode: distributed ## other supported values are "standalone"
@@ -120,7 +120,7 @@ bucketRoot: ""
 # Number of drives attached to a node
 drivesPerNode: 1
 # Number of MinIO containers running
-replicas: 16
+replicas: 1 #16
 # Number of expanded MinIO clusters
 pools: 1
 

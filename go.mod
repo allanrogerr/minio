@@ -2,6 +2,8 @@ module github.com/minio/minio
 
 go 1.23
 
+replace github.com/minio/console => ../console
+
 require (
 	cloud.google.com/go/storage v1.46.0
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.16.0
@@ -49,10 +51,10 @@ require (
 	github.com/minio/highwayhash v1.0.3
 	github.com/minio/kms-go/kes v0.3.0
 	github.com/minio/kms-go/kms v0.4.0
-	github.com/minio/madmin-go/v3 v3.0.78
-	github.com/minio/minio-go/v7 v7.0.82
+	github.com/minio/madmin-go/v3 v3.0.85
+	github.com/minio/minio-go/v7 v7.0.83-0.20241230094935-5757f2c8544a
 	github.com/minio/mux v1.9.0
-	github.com/minio/pkg/v3 v3.0.23
+	github.com/minio/pkg/v3 v3.0.25
 	github.com/minio/selfupdate v0.6.0
 	github.com/minio/simdjson-go v0.4.5
 	github.com/minio/sio v0.4.1
@@ -202,7 +204,7 @@ require (
 	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect
 	github.com/minio/colorjson v1.0.8 // indirect
 	github.com/minio/filepath v1.0.0 // indirect
-	github.com/minio/mc v0.0.0-20241113163349-308a8ea9d072 // indirect
+	github.com/minio/mc v0.0.0-20241215225040-f4dd5e4a07ff // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/minio/websocket v1.6.0 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
@@ -254,7 +256,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.32.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/mod v0.22.0 // indirect
-	golang.org/x/net v0.32.0 // indirect
+	golang.org/x/net v0.33.0 // indirect
 	golang.org/x/text v0.21.0 // indirect
 	golang.org/x/tools v0.27.0 // indirect
 	google.golang.org/genproto v0.0.0-20241113202542-65e8d215514f // indirect

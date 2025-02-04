@@ -583,6 +583,7 @@ func (s *xlStorage) NSScanner(ctx context.Context, cache dataUsageCache, updates
 	cache.Info.updates = updates
 
 	dataUsageInfo, err := scanDataFolder(ctx, disks, s, cache, func(item scannerItem) (sizeSummary, error) {
+		fmt.Println("scanDataFolder", item.bucket, item.Path, item.objectName)
 		// Look for `xl.meta/xl.json' at the leaf.
 		if !strings.HasSuffix(item.Path, SlashSeparator+xlStorageFormatFile) &&
 			!strings.HasSuffix(item.Path, SlashSeparator+xlStorageFormatFileV1) {
@@ -603,6 +604,7 @@ func (s *xlStorage) NSScanner(ctx context.Context, cache dataUsageCache, updates
 			res["err"] = err.Error()
 			return sizeSummary{}, errSkipFile
 		}
+		fmt.Println(string(buf))
 
 		// Remove filename which is the meta file.
 		item.transformMetaDir()
@@ -638,7 +640,9 @@ func (s *xlStorage) NSScanner(ctx context.Context, cache dataUsageCache, updates
 		versioned := vcfg != nil && vcfg.Versioned(item.objectPath())
 
 		var objDeleted bool
+		////fmt.Println("scanDataFolder", item.lifeCycle.XMLName, item.bucket, item.Path, item.objectName)
 		for _, oi := range objInfos {
+			fmt.Println("oi", oi.Name, oi.VersionID, oi.UserTags)
 			done = globalScannerMetrics.time(scannerMetricApplyVersion)
 			var sz int64
 			objDeleted, sz = item.applyActions(ctx, objAPI, oi, &sizeS)

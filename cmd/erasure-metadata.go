@@ -123,6 +123,7 @@ func (fi FileInfo) ToObjectInfo(bucket, object string, versioned bool) ObjectInf
 	objInfo.ETag = extractETag(fi.Metadata)
 
 	// Add user tags to the object info
+	//fmt.Println("fi.Metadata[xhttp.AmzObjectTagging]", bucket, object, "fi.VersionID", fi.VersionID, "fi.Metadata[xhttp.AmzObjectTagging]", fi.Metadata[xhttp.AmzObjectTagging])
 	tags := fi.Metadata[xhttp.AmzObjectTagging]
 	if len(tags) != 0 {
 		objInfo.UserTags = tags

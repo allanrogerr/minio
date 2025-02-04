@@ -1056,18 +1056,41 @@ func (i *scannerItem) applyNewerNoncurrentVersionLimit(ctx context.Context, _ Ob
 		return objectInfos, nil
 	}
 
-	event := i.lifeCycle.NoncurrentVersionsExpirationLimit(lifecycle.ObjectOpts{Name: i.objectPath()})
+	// Populate a list of file versions that also fulfill the filter clause
+	var limitFivs []FileInfo
+	event := lifecycle.Event{}
+	for _, fi := range fivs {
+		obj := fi.ToObjectInfo(i.bucket, i.objectPath(), versioned)
+		objRules := i.lifeCycle.FilterRules(obj.ToLifecycleOpts())
+		for _, rule := range i.lifeCycle.Rules {
+			// Only examine NoncurrentVersionExpiration
+			if rule.NoncurrentVersionExpiration.NewerNoncurrentVersions == 0 && rule.NoncurrentVersionExpiration.NoncurrentDays == 0 {
+				continue
+			}
+			for _, objRule := range objRules {
+				if objRule.ID == rule.ID {
+					// If the object rule matches the life cycle rule
+					if event == (lifecycle.Event{}) {
+						// Save the event
+						event = i.lifeCycle.NoncurrentVersionsExpirationLimit(obj.ToLifecycleOpts())
+					}
+					limitFivs = append(limitFivs, fi)
+				}
+			}
+		}
+	}
+
 	lim := event.NewerNoncurrentVersions
-	if lim == 0 || len(fivs) <= lim+1 { // fewer than lim _noncurrent_ versions
+	if lim == 0 || len(limitFivs) <= lim+1 { // fewer than lim _noncurrent_ versions
 		for _, fi := range fivs {
 			objectInfos = append(objectInfos, fi.ToObjectInfo(i.bucket, i.objectPath(), versioned))
 		}
 		return objectInfos, nil
 	}
 
-	overflowVersions := fivs[lim+1:]
+	overflowVersions := limitFivs[lim+1:]
 	// Retain the current version + most recent lim noncurrent versions
-	for _, fi := range fivs[:lim+1] {
+	for _, fi := range limitFivs[:lim+1] {
 		objectInfos = append(objectInfos, fi.ToObjectInfo(i.bucket, i.objectPath(), versioned))
 	}
 

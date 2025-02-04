@@ -274,6 +274,7 @@ func (lc Lifecycle) Validate(lr lock.Retention) error {
 
 // FilterRules returns the rules filtered by the status, prefix and tags
 func (lc Lifecycle) FilterRules(obj ObjectOpts) []Rule {
+	fmt.Print("    lc.FilterRules on: ", obj.Name, obj.VersionID, obj.UserTags)
 	if obj.Name == "" {
 		return nil
 	}
@@ -293,6 +294,7 @@ func (lc Lifecycle) FilterRules(obj ObjectOpts) []Rule {
 		}
 		rules = append(rules, rule)
 	}
+	fmt.Println(" - len(rules)", len(rules))
 	return rules
 }
 
@@ -359,6 +361,7 @@ func (lc Lifecycle) eval(obj ObjectOpts, now time.Time) Event {
 	}
 
 	for _, rule := range lc.FilterRules(obj) {
+		fmt.Println("  eval lc.FilterRules(obj) on: ", obj.Name, obj.VersionID, obj.UserTags)
 		if obj.ExpiredObjectDeleteMarker() {
 			if rule.Expiration.DeleteMarker.val {
 				// Indicates whether MinIO will remove a delete marker with no noncurrent versions.
@@ -546,6 +549,7 @@ func (lc Lifecycle) SetPredictionHeaders(w http.ResponseWriter, obj ObjectOpts) 
 // NoncurrentVersionsExpirationLimit returns the number of noncurrent versions
 // to be retained from the first applicable rule per S3 behavior.
 func (lc Lifecycle) NoncurrentVersionsExpirationLimit(obj ObjectOpts) Event {
+	fmt.Println("    find event - NoncurrentVersionsExpirationLimit: ", obj.Name, obj.VersionID, obj.UserTags)
 	for _, rule := range lc.FilterRules(obj) {
 		if rule.NoncurrentVersionExpiration.NewerNoncurrentVersions == 0 {
 			continue

@@ -329,6 +329,7 @@ func (es *expiryState) Worker(input <-chan expiryOp) {
 		case <-es.ctx.Done():
 			return
 		case v, ok := <-input:
+
 			if !ok {
 				return
 			}
@@ -344,6 +345,7 @@ func (es *expiryState) Worker(input <-chan expiryOp) {
 					applyExpiryOnNonTransitionedObjects(es.ctx, es.objAPI, v.objInfo, v.event, v.src)
 				}
 			case newerNoncurrentTask:
+				fmt.Println("newerNoncurrentTask: ", v.bucket, v.versions, v.event)
 				deleteObjectVersions(es.ctx, es.objAPI, v.bucket, v.versions, v.event)
 			case jentry:
 				transitionLogIf(es.ctx, deleteObjectFromRemoteTier(es.ctx, v.ObjName, v.VersionID, v.TierName))

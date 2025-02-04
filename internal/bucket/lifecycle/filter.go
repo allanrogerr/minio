@@ -19,6 +19,7 @@ package lifecycle
 
 import (
 	"encoding/xml"
+	"fmt"
 	"io"
 
 	"github.com/minio/minio-go/v7/pkg/tags"
@@ -245,10 +246,12 @@ func (f Filter) TestTags(userTags string) bool {
 	for k, cv := range f.cachedTags {
 		v, ok := tagsMap[k]
 		if !ok || v != cv {
+			fmt.Println("ok", ok, "v", v, "cv", cv)
 			mismatch = true
 			break
 		}
 	}
+	fmt.Print(" - TestTags match = ", !mismatch)
 	return !mismatch
 }
 
